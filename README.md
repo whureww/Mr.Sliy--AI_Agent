@@ -205,6 +205,12 @@ MIT（见 [package.json](package.json)）。
 
 完整历史见 [GitHub Releases](https://github.com/whureww/Mr.Sliy--AI_Agent/releases)。
 
+### v0.1.10（2026-09-16）
+
+- 修复：启动动画结束后主工作区偶发不显示 / 页面切换频繁闪动（WebView2 合成器停滞时 routeIn 动画被冻结在 from 帧，淡入改由内联样式瞬时翻转，不再依赖合成器）
+- 修复：编辑模式同一文件双击 / 连点开出多个重复标签页（打开竞态：在途守卫 + 提交时二次查重）
+- 修复：多标签页打开过多后页面卡死（标签栏溢出检测用 display:none 隐藏导致测量值震荡，ResizeObserver 无限翻转；改用 visibility 保留占位并跳过不可见容器）
+
 ### v0.1.7（2026-09-14）
 
 - 编辑器：AI 修改处行级 Diff 高亮、括号自动补对与自动缩进、字号设置（小 / 标准 / 大 / 特大）

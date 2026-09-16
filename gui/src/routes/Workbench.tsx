@@ -142,6 +142,8 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
   const [savedFlash, setSavedFlash] = useState(false);
   /** 编辑器多标签页（编辑模式）：与 currentFile 双向同步 */
   const [tabs, setTabs] = useState<EditorTab[]>([]);
+  /** 在途打开守卫：记录正在 readFile 的路径（小写），防止双击/连点产生重复标签 */
+  const openingRef = useRef<Set<string>>(new Set());
   /** 标签栏溢出检测:溢出时收起为下拉面板(▼ n),未溢出正常平铺 */
   const tabBarRef = useRef<HTMLDivElement | null>(null);
   const [tabOverflow, setTabOverflow] = useState(false);
@@ -215,6 +217,8 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
       return;
     }
     const measure = () => {
+      // 容器不可见(宽 0,如分析模式/折叠)时跳过,避免误判
+      if (el.clientWidth === 0) return;
       // 内层实际内容宽度(scrollWidth) > 容器可视宽度 → 溢出
       const overflow = tabs.length > 0 && el.scrollWidth > el.clientWidth + 1;
       setTabOverflow((prev) => {
@@ -470,12 +474,23 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
       if (line) setTimeout(() => editorApiRef.current?.revealLine(line), 80);
       return;
     }
+    // 双击/连点防抖：查重发生在 await 之前，两次快速调用都会通过上面的
+    // existing 检查；不加在途守卫的话，await 返回后会各追加一个标签页，
+    // 造成同一文件"多开"出多个标签。
+    const pathKey = node.path.toLowerCase();
+    if (openingRef.current.has(pathKey)) return;
+    openingRef.current.add(pathKey);
     try {
       const { content, encoding } = await readFile(node.path);
       setCurrentFile({ path: node.path, content });
       setDiskContent(content);
       setResult(null);
-      setTabs((t) => [...t, { path: node.path, content, disk: content, result: null, encoding }]);
+      // 提交时再查重：在途期间标签可能已由其他入口加入
+      setTabs((t) =>
+        t.some((x) => x.path.toLowerCase() === pathKey)
+          ? t
+          : [...t, { path: node.path, content, disk: content, result: null, encoding }]
+      );
       setMessages((m) => [
         ...m,
         {
@@ -488,6 +503,8 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
       if (line) setTimeout(() => editorApiRef.current?.revealLine(line), 80);
     } catch {
       setError(t('wb.readFail'));
+    } finally {
+      openingRef.current.delete(pathKey);
     }
   };
 
@@ -1185,7 +1202,11 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
                     ])
                   }
                   style={{
-                    display: hidden ? 'none' : 'flex',
+                    display: 'flex',
+                    // 溢出收起必须用 visibility(保留占位,scrollWidth 测量值稳定)。
+                    // 绝不能用 display:none:内容塌空 → scrollWidth 归零 → 判定不溢出
+                    // → 恢复显示 → 又溢出 → 无限翻转,ResizeObserver 跟随震荡把页面卡死
+                    visibility: hidden ? 'hidden' : 'visible',
                     alignItems: 'center',
                     gap: 6,
                     padding: '4px 10px',

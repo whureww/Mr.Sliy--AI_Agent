@@ -252,11 +252,15 @@ button {
 }
 .collapse-open .collapse-inner { visibility: visible; transition: visibility 0s; }
 
-/* ---------- 页面切换过渡:内容淡入 + 顶部缓冲进度条 ---------- */
+/* ---------- 页面切换过渡:内容上浮归位 + 顶部缓冲进度条 ---------- */
+/* 注意:此处绝不能动画 opacity。WebView2 合成器偶发停滞会推迟动画开始时间,
+   both 填充会把元素冻结在 from 帧(opacity 0)压过内联样式,造成"加载完但内容
+   永久不显示/来回闪现"。淡入淡出由 App.tsx 的内联 opacity 瞬时翻转负责,
+   这里只保留 transform 位移,即使动画被冻结也不影响可见性。 */
 .route-enter { animation: routeIn 0.32s cubic-bezier(0.22, 1, 0.36, 1) both; }
 @keyframes routeIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
+  from { transform: translateY(6px); }
+  to { transform: none; }
 }
 .route-buffer {
   position: absolute;
