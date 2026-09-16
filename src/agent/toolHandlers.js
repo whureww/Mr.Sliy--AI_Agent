@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { safeResolvePath } = require('../utils/securityGuard');
+const { readTextFile, encodeText } = require('../utils/encoding');
 const { getFileLanguage } = require('../utils/helpers');
 const { providerManager } = require('../services/llm/providers');
 const { selfUpdateManager } = require('../services/bootstrap/selfUpdateManager');
@@ -150,10 +151,11 @@ function createToolHandlers(agent) {
         return { success: false, message: pathCheck.error };
       }
       const resolvedPath = pathCheck.resolvedPath;
-      // 异步读取文件，避免阻塞事件循环；文件不存在时 readFile 抛 ENOENT
+      // 编码自动检测读取；备份与写回沿用原编码，避免非 UTF-8 文件被转码破坏
       let originalCode;
+      let fileEncoding;
       try {
-        originalCode = await fs.promises.readFile(resolvedPath, 'utf-8');
+        ({ text: originalCode, encoding: fileEncoding } = await readTextFile(resolvedPath));
       } catch (e) {
         if (e.code === 'ENOENT') {
           return { success: false, message: `文件不存在: ${resolvedPath}` };
@@ -206,15 +208,16 @@ ${JSON.stringify(analyzeResult.issues, null, 2)}
       const createBackup = p.createBackup !== false;
       if (createBackup) {
         const backupPath = resolvedPath + '.bak';
-        await fs.promises.writeFile(backupPath, originalCode, 'utf-8');
+        await fs.promises.writeFile(backupPath, encodeText(originalCode, fileEncoding));
       }
 
-      await fs.promises.writeFile(resolvedPath, optimizedCode, 'utf-8');
+      await fs.promises.writeFile(resolvedPath, encodeText(optimizedCode, fileEncoding));
 
       return {
         success: true,
         message: '文件已修复并保存',
         filePath: resolvedPath,
+        encoding: fileEncoding,
         issuesFixed: analyzeResult.issues.length,
         issues: analyzeResult.issues,
         backupCreated: createBackup
@@ -238,10 +241,11 @@ ${JSON.stringify(analyzeResult.issues, null, 2)}
         return { success: false, message: pathCheck.error };
       }
       const resolvedPath = pathCheck.resolvedPath;
-      // 异步读取文件，避免阻塞事件循环
+      // 编码自动检测读取；备份与写回沿用原编码，避免非 UTF-8 文件被转码破坏
       let originalCode;
+      let fileEncoding;
       try {
-        originalCode = await fs.promises.readFile(resolvedPath, 'utf-8');
+        ({ text: originalCode, encoding: fileEncoding } = await readTextFile(resolvedPath));
       } catch (e) {
         if (e.code === 'ENOENT') {
           return { success: false, message: `文件不存在: ${resolvedPath}` };
@@ -252,15 +256,16 @@ ${JSON.stringify(analyzeResult.issues, null, 2)}
 
       if (createBackup) {
         const backupPath = resolvedPath + '.bak';
-        await fs.promises.writeFile(backupPath, originalCode, 'utf-8');
+        await fs.promises.writeFile(backupPath, encodeText(originalCode, fileEncoding));
       }
 
-      await fs.promises.writeFile(resolvedPath, optimizedCode, 'utf-8');
+      await fs.promises.writeFile(resolvedPath, encodeText(optimizedCode, fileEncoding));
 
       return {
         success: true,
         message: '代码已应用到文件',
         filePath: resolvedPath,
+        encoding: fileEncoding,
         backupCreated: createBackup,
         backupPath: createBackup ? resolvedPath + '.bak' : null
       };

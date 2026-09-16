@@ -93,6 +93,8 @@ npm install -g mr-sliy
 mr-sliy          # inside the repo: npm start
 ```
 
+> The desktop installer also bundles the CLI: check "Install command-line tool" during setup to run `mr-sliy` from any terminal (uses the bundled Node runtime, no Node.js installation needed). It is removed automatically on uninstall.
+
 | Command | Description |
 |---------|-------------|
 | `/analyze` | Code analysis (analyze file / scan project) |

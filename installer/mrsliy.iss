@@ -3,7 +3,7 @@
 
 #define MyAppName "MR·SLIY 代码优化智能体"
 #define MyAppExeName "mrsliy-desktop.exe"
-#define MyAppVersion "0.1.8"
+#define MyAppVersion "0.1.9"
 #define ProjRoot "d:\Final\final"
 
 [Setup]
@@ -24,12 +24,15 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 SetupIconFile={#ProjRoot}\src-tauri\icons\icon.ico
+; 勾选 CLI 任务时写入系统 PATH，安装完成后广播环境变更
+ChangesEnvironment=yes
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
+Name: "cli"; Description: "安装命令行工具（CLI，可在任意终端运行 mr-sliy）"; GroupDescription: "附加任务:"; Flags: checkedonce
 
 [Files]
 ; 主程序（release 构建产物，前端资源已嵌入）
@@ -66,6 +69,81 @@ Filename: "taskkill"; Parameters: "/f /im {#MyAppExeName}"; RunOnceId: "KillApp"
 // 安装/卸载前结束主程序；sidecar 携带父进程 watchdog，主程序退出后 3 秒内自动退出
 procedure Sleep(ms: Integer); external 'Sleep@kernel32.dll stdcall';
 
+const
+  EnvPathKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+  MslHwndBroadcast = $FFFF;
+  MslWmSettingChange = $001A;
+  MslSmtoAbortIfHung = $0002;
+
+// 安装完成后通知资源管理器重载环境变量（否则新开终端拿不到更新后的 PATH）
+function SendMessageTimeoutW(hWnd: LongWord; Msg: LongWord; wParam: LongWord;
+  lParam: string; fuFlags: LongWord; uTimeout: LongWord; var lpdwResult: LongWord): LongWord;
+  external 'SendMessageTimeoutW@user32.dll stdcall';
+
+procedure BroadcastEnvironmentChange();
+var
+  Res: LongWord;
+begin
+  SendMessageTimeoutW(MslHwndBroadcast, MslWmSettingChange, 0, 'Environment', MslSmtoAbortIfHung, 2000, Res);
+end;
+
+// 生成 CLI 垫片：用内置 Node 运行 CLI 入口，不依赖系统 node
+// 同时提供 mr-sliy 与 sliy 两个命令名（与 npm 全局安装的 bin 别名一致）
+procedure WriteCliShim();
+var
+  AppDir, Content: String;
+begin
+  AppDir := ExpandConstant('{app}');
+  Content := '@echo off' #13#10
+    + 'setlocal' #13#10
+    + '"' + AppDir + '\runtime\node.exe" "' + AppDir + '\src\agent.js" %*' #13#10;
+  SaveStringToFile(ExpandConstant('{app}\mr-sliy.cmd'), Content, False);
+  SaveStringToFile(ExpandConstant('{app}\sliy.cmd'), Content, False);
+end;
+
+function PathContains(const Path, Dir: String): Boolean;
+begin
+  Result := Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Path) + ';') > 0;
+end;
+
+procedure AddToPath();
+var
+  Path, AppDir: String;
+begin
+  AppDir := ExpandConstant('{app}');
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE, EnvPathKey, 'Path', Path) then
+    Path := '';
+  if PathContains(Path, AppDir) then Exit;
+  if Path = '' then Path := AppDir else Path := Path + ';' + AppDir;
+  RegWriteStringValue(HKEY_LOCAL_MACHINE, EnvPathKey, 'Path', Path);
+end;
+
+procedure RemoveFromPath();
+var
+  Path, Rest, AppDir, Up, Part, NewPath: String;
+  P: Integer;
+begin
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE, EnvPathKey, 'Path', Path) then Exit;
+  AppDir := ExpandConstant('{app}');
+  Up := Uppercase(AppDir);
+  NewPath := '';
+  Rest := Path;
+  while Length(Rest) > 0 do begin
+    P := Pos(';', Rest);
+    if P = 0 then begin
+      Part := Rest;
+      Rest := '';
+    end else begin
+      Part := Copy(Rest, 1, P - 1);
+      Rest := Copy(Rest, P + 1, MaxInt);
+    end;
+    if Uppercase(Trim(Part)) <> Up then begin
+      if NewPath = '' then NewPath := Part else NewPath := NewPath + ';' + Part;
+    end;
+  end;
+  RegWriteStringValue(HKEY_LOCAL_MACHINE, EnvPathKey, 'Path', NewPath);
+end;
+
 procedure KillRunningApp();
 var
   ResultCode: Integer;
@@ -79,10 +157,20 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
     KillRunningApp();
+  if CurStep = ssPostInstall then begin
+    if WizardIsTaskSelected('cli') then begin
+      WriteCliShim();
+      AddToPath();
+      BroadcastEnvironmentChange();
+    end;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usUninstall then
+  if CurUninstallStep = usUninstall then begin
     KillRunningApp();
+    RemoveFromPath();
+    BroadcastEnvironmentChange();
+  end;
 end;

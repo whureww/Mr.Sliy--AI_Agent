@@ -396,6 +396,7 @@ const DICT: Record<string, Entry> = {
   'wb.save': { zh: '保存到原文件', en: 'Save to file' },
   'wb.saving': { zh: '保存中…', en: 'Saving…' },
   'wb.saved': { zh: '已保存', en: 'Saved' },
+  'wb.encoding': { zh: '文件编码：未修改时切换将按所选编码重读文件，修改后 Ctrl+S 以所选编码保存', en: 'File encoding: switching reloads the file when unmodified; Ctrl+S saves with it' },
   'wb.saveChanges': { zh: '保存修改', en: 'Save changes' },
   'wb.saveFail': { zh: '保存失败: {msg}', en: 'Save failed: {msg}' },
   'wb.cannotWrite': { zh: '无法写入文件', en: 'Cannot write the file' },

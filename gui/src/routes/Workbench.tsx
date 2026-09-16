@@ -37,13 +37,35 @@ interface Props {
   onReady?: () => void;
 }
 
-/** 编辑器多标签页：每个标签持有独立内容/磁盘基线/扫描结果 */
+/** 编辑器多标签页：每个标签持有独立内容/磁盘基线/扫描结果/文件编码 */
 interface EditorTab {
   path: string;
   content: string;
   disk: string;
   result: AnalyzeResult | null;
+  encoding?: string;
 }
+
+/** 编辑器支持保存/重载的文件编码（Rust 侧 encoding_rs 全量支持，此处列出常用集） */
+const ENCODINGS: { value: string; label: string }[] = [
+  { value: 'utf-8', label: 'UTF-8' },
+  { value: 'utf-8-bom', label: 'UTF-8 (BOM)' },
+  { value: 'utf-16le-bom', label: 'UTF-16 LE' },
+  { value: 'utf-16be-bom', label: 'UTF-16 BE' },
+  { value: 'gbk', label: 'GBK / GB2312' },
+  { value: 'gb18030', label: 'GB18030' },
+  { value: 'big5', label: 'Big5 (繁体中文)' },
+  { value: 'shift_jis', label: 'Shift_JIS (日语)' },
+  { value: 'euc-jp', label: 'EUC-JP (日语)' },
+  { value: 'iso-2022-jp', label: 'ISO-2022-JP (日语)' },
+  { value: 'euc-kr', label: 'EUC-KR (韩语)' },
+  { value: 'windows-1252', label: 'Windows-1252 (西欧)' },
+  { value: 'windows-1251', label: 'Windows-1251 (西里尔)' },
+  { value: 'windows-1250', label: 'Windows-1250 (中欧)' },
+  { value: 'koi8-r', label: 'KOI8-R (俄语)' },
+  { value: 'iso-8859-7', label: 'ISO-8859-7 (希腊)' },
+  { value: 'ibm866', label: 'IBM866 (西里尔)' }
+];
 
 interface Session {
   currentFile: { path: string; content: string } | null;
@@ -311,12 +333,26 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
   /** 未保存标记：编辑内容 ≠ 磁盘内容 */
   const dirty = !!currentFile && currentFile.content !== diskContent;
 
+  /** 以文件当前编码写盘：优先标签页记录的编码；无记录（旧会话）时按磁盘文件自动检测并缓存——"自动识别、原格式保存" */
+  const savePreservingEncoding = async (path: string, content: string) => {
+    let enc = tabs.find((x) => x.path === path)?.encoding;
+    if (!enc) {
+      try {
+        enc = (await readFile(path)).encoding;
+        setTabs((t) => t.map((x) => (x.path === path ? { ...x, encoding: enc } : x)));
+      } catch {
+        enc = undefined; // 读不到磁盘文件时回落 UTF-8
+      }
+    }
+    await saveFile(path, content, enc);
+  };
+
   /** 保存编辑内容到磁盘文件 */
   const saveToDisk = async () => {
     if (!currentFile || saving || activeLocked) return;
     setSaving(true);
     try {
-      await saveFile(currentFile.path, currentFile.content);
+      await savePreservingEncoding(currentFile.path, currentFile.content);
       setDiskContent(currentFile.content);
       setTabs((t) => t.map((x) => (x.path === currentFile.path ? { ...x, disk: currentFile.content, content: currentFile.content } : x)));
       setSavedFlash(true);
@@ -336,6 +372,26 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
       setTabs((t) => t.map((x) => (x.path === f.path ? { ...x, content: v } : x)));
       return { ...f, content: v };
     });
+  };
+
+  /** 当前文件编码（未记录过视为 UTF-8） */
+  const currentEncoding = (currentFile && tabs.find((x) => x.path === currentFile.path)?.encoding) || 'utf-8';
+
+  /** 切换文件编码：未修改时按所选编码重读文件（相当于"以编码重新打开"），已修改时仅作为保存编码 */
+  const changeEncoding = async (enc: string) => {
+    if (!currentFile) return;
+    const target = currentFile.path;
+    setTabs((t) => t.map((x) => (x.path === target ? { ...x, encoding: enc } : x)));
+    if (currentFile.content !== diskContent) return;
+    try {
+      const { content } = await readFile(target, enc);
+      setCurrentFile((f) => (f && f.path === target ? { ...f, content } : f));
+      setDiskContent(content);
+      setTabs((t) => t.map((x) => (x.path === target ? { ...x, content, disk: content } : x)));
+      setHighlightLines([]);
+    } catch {
+      setError(t('wb.readFail'));
+    }
   };
 
   /** 定时自动扫描：激活工作区开启定时后，按间隔触发当前文件的静默扫描 */
@@ -382,7 +438,7 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
     setCurrentFile(updated);
     setTabs((t) => t.map((x) => (x.path === updated.path ? { ...x, content: updated.content, disk: updated.content } : x)));
     try {
-      await saveFile(updated.path, updated.content);
+      await savePreservingEncoding(updated.path, updated.content);
       setDiskContent(updated.content);
       return null;
     } catch (e) {
@@ -391,7 +447,11 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
   };
 
   /** 打开文件；line 存在时（全文搜索/树过滤/问题卡片）打开后定位到该行 */
-  const openFile = async (node: { path: string; name?: string; is_dir?: boolean }, line?: number) => {
+  const openFile = async (
+    node: { path: string; name?: string; is_dir?: boolean },
+    line?: number,
+    opts?: { analyze?: boolean }
+  ) => {
     if (!activeWs) return;
     if (activeLocked) {
       setError(t('wb.lockedUnlockFirst'));
@@ -399,6 +459,8 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
     }
     setError('');
     setHighlightLines([]);
+    // 过滤命中/搜索直达：打开后自动切到分析模式（编辑模式的常规文件树点击仍留在编辑器）
+    if (opts?.analyze && mode === 'editor') onModeChange('analysis');
     // 已在标签页中打开 → 直接激活（保留编辑内容与扫描结果）
     const existing = tabs.find((t) => t.path.toLowerCase() === node.path.toLowerCase());
     if (existing) {
@@ -409,11 +471,11 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
       return;
     }
     try {
-      const { content } = await readFile(node.path);
+      const { content, encoding } = await readFile(node.path);
       setCurrentFile({ path: node.path, content });
       setDiskContent(content);
       setResult(null);
-      setTabs((t) => [...t, { path: node.path, content, disk: content, result: null }]);
+      setTabs((t) => [...t, { path: node.path, content, disk: content, result: null, encoding }]);
       setMessages((m) => [
         ...m,
         {
@@ -782,7 +844,7 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
       setCurrentFile(restored);
       setTabs((t) => t.map((x) => (x.path === restored.path ? { ...x, content: restored.content, disk: restored.content } : x)));
       try {
-        await saveFile(restored.path, restored.content);
+        await savePreservingEncoding(restored.path, restored.content);
         setDiskContent(restored.content);
         setMessages((m) => m.map((x) => (x.id === msgId ? { ...x, modStatus: 'undone' } : x)));
       } catch (e) {
@@ -816,7 +878,7 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
         setCurrentFile(updated);
         setTabs((t) => t.map((x) => (x.path === updated.path ? { ...x, content: updated.content, disk: updated.content } : x)));
         try {
-          await saveFile(updated.path, updated.content);
+          await savePreservingEncoding(updated.path, updated.content);
           setDiskContent(updated.content);
           err = null;
         } catch (e) {
@@ -1069,6 +1131,22 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
           )}
           {activeLocked && <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>· {t('wb.locked')}</span>}
           <div style={{ flex: 1 }} />
+          {currentFile && (
+            <select
+              value={currentEncoding}
+              onChange={(e) => void changeEncoding(e.target.value)}
+              title={t('wb.encoding')}
+              style={{ padding: '3px 6px', fontSize: 11.5, borderRadius: 7, border: '1px solid var(--border)', background: 'var(--bg-recessed)', color: 'var(--text-primary)' }}
+            >
+              {ENCODINGS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+              {/* 自动检测出列表外编码（如 windows-1254）时追加显示，保证与保存行为一致 */}
+              {!ENCODINGS.some((o) => o.value === currentEncoding) && (
+                <option value={currentEncoding}>{currentEncoding.toUpperCase()}</option>
+              )}
+            </select>
+          )}
           {currentFile && (
             <button
               className="btn-ghost"

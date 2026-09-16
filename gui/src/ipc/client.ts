@@ -97,12 +97,12 @@ export async function listDir(path: string): Promise<FileNode[]> {
   return invoke<FileNode[]>('list_dir', { path });
 }
 
-export async function readFile(path: string): Promise<{ content: string; language: string }> {
-  return invoke('read_file', { path });
+export async function readFile(path: string, encoding?: string): Promise<{ content: string; language: string; encoding: string }> {
+  return invoke('read_file', encoding ? { path, encoding } : { path });
 }
 
-export async function saveFile(path: string, content: string): Promise<void> {
-  return invoke('save_file', { path, content });
+export async function saveFile(path: string, content: string, encoding?: string): Promise<void> {
+  return invoke('save_file', encoding ? { path, content, encoding } : { path, content });
 }
 
 /** 前端状态文件读写：~/.mr-sliy/gui-state/<name>.json（浏览器调试时回落 localStorage） */

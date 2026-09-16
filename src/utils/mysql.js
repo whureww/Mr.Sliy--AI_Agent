@@ -16,6 +16,21 @@ let connectionHealthy = false;
 let healthCheckTimer = null;
 const HEALTH_CHECK_INTERVAL = 60000;
 
+// ---------- 连接失败指数退避（熔断）----------
+// 远端 MySQL 不可达/权限错误时，同步队列(30s)与健康检查(60s)都会反复触发
+// ensureDatabaseExists，建立连接 + 10s 超时 + warn 日志每分钟刷屏。
+// 连续失败期间按指数退避跳过尝试：1min → 2min → 4min → … 封顶 15min；
+// 首次失败 warn 一次，后续降为 debug，恢复时 info 通知。用户主动操作（测试连接/切换连接）不受退避限制。
+let ensureFailureCount = 0;
+let ensureFailureKey = '';
+let lastEnsureAttemptAt = 0;
+const ENSURE_BASE_BACKOFF_MS = 60000;
+const ENSURE_MAX_BACKOFF_MS = 15 * 60000;
+
+function ensureBackoffMs() {
+  return Math.min(ENSURE_BASE_BACKOFF_MS * 2 ** Math.max(0, ensureFailureCount - 1), ENSURE_MAX_BACKOFF_MS);
+}
+
 /**
  * 获取MySQL连接池配置
  */
@@ -61,14 +76,70 @@ function getConnectionConfigFromCustom(customConfig) {
 }
 
 /**
- * 确保目标数据库存在（不存在则自动创建）
- * 用于应对云端数据库被意外删除后 ER_BAD_DB_ERROR 连接失败的情况
- * @returns {Promise<boolean>} true=数据库可用，false=连接或权限错误
+ * 将 MySQL 连接错误翻译为可操作的处理指引（用户看得懂、知道去哪改）
  */
-async function ensureDatabaseExists(mysqlConfig) {
+function describeMysqlErrorHint(error) {
+  const errno = error && error.errno;
+  const code = (error && error.code) || '';
+  if (errno === 1045) return '用户名或密码错误：请核对数据库账号密码';
+  if (errno === 1130) return '服务器拒绝了本机公网 IP 的连接：请到云数据库控制台将当前出口 IP 加入白名单，或将该用户的 host 改为 %';
+  if (errno === 1044 || errno === 1142) return '权限不足：请到云数据库控制台为该账号授权，或将配置中的库名改为服务商预建的数据库名';
+  if (errno === 1049) return '数据库不存在且当前账号无自动建库权限：请到云数据库控制台创建该库，或把配置改为服务商预建的库名';
+  if (/ETIMEDOUT|ECONNREFUSED|ENOTFOUND/.test(code)) return '网络不可达：请检查主机地址、端口以及安全组/防火墙是否放行 3306（或自定义端口）';
+  if (code === 'ECONNRESET') return '连接被重置：常见于安全组/白名单拦截，请到云数据库控制台将当前出口 IP 加入白名单';
+  return '';
+}
+
+/**
+ * 验证目标数据库可直接访问（不要求建库权限）。
+ * 托管云 MySQL 通常只授予预建库权限、不给 CREATE DATABASE 权限，
+ * 因此建库失败并不代表目标库不可用——以直连验证结果为准。
+ * @returns {Promise<void>} 可访问则 resolve；不可访问则抛出直连时的真实错误（如 1049 库不存在）
+ */
+async function verifyTargetDatabase(mysqlConfig) {
+  let conn = null;
+  try {
+    conn = await mysql.createConnection({
+      host: mysqlConfig.host,
+      port: mysqlConfig.port || 3306,
+      user: mysqlConfig.user,
+      password: mysqlConfig.password,
+      database: mysqlConfig.database,
+      connectTimeout: 10000,
+      charset: 'utf8mb4'
+    });
+    await conn.execute('SELECT 1');
+  } finally {
+    if (conn) { try { await conn.end(); } catch (_) { /* ignore */ } }
+  }
+}
+
+/**
+ * 确保目标数据库可用：
+ * 1. 尝试 CREATE DATABASE IF NOT EXISTS（自建库场景友好）
+ * 2. 若因权限（1044/1142）失败——不代表目标库不可用——降级为直连目标库验证，
+ *    可访问即继续（托管云预建库场景）；不可访问则抛出真实原因
+ * 3. 其余错误（1045 密码错误 / 1130 白名单拒绝 / 网络不可达）为真实失败，附带处理指引
+ * @param {object} mysqlConfig 连接配置
+ * @param {object} [opts]
+ * @param {boolean} [opts.force] 用户主动操作（测试连接/切换连接）时为 true，跳过退避直接尝试
+ * @returns {Promise<boolean>} true=数据库可用，false=连接或权限错误（或处于退避期内）
+ */
+async function ensureDatabaseExists(mysqlConfig, opts = {}) {
   if (!mysqlConfig || !mysqlConfig.host || !mysqlConfig.database) {
     return false;
   }
+  // 换了连接配置：重新计数
+  const failureKey = `${mysqlConfig.host}:${mysqlConfig.port || 3306}:${mysqlConfig.database}:${mysqlConfig.user}`;
+  if (failureKey !== ensureFailureKey) {
+    ensureFailureKey = failureKey;
+    ensureFailureCount = 0;
+  }
+  // 退避期内静默跳过：不建连接、不打日志
+  if (!opts.force && ensureFailureCount > 0 && Date.now() - lastEnsureAttemptAt < ensureBackoffMs()) {
+    return false;
+  }
+  lastEnsureAttemptAt = Date.now();
   let conn = null;
   try {
     conn = await mysql.createConnection({
@@ -81,11 +152,36 @@ async function ensureDatabaseExists(mysqlConfig) {
     });
     // 限定数据库名只允许安全字符，配合反引号避免关键字冲突
     const safeDb = String(mysqlConfig.database).replace(/[^a-zA-Z0-9_$]/g, '_');
-    await conn.execute(`CREATE DATABASE IF NOT EXISTS \`${safeDb}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-    logger.info(`[MySQL] 确保数据库存在: ${safeDb}`);
+    let created = false;
+    try {
+      await conn.execute(`CREATE DATABASE IF NOT EXISTS \`${safeDb}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+      created = true;
+    } catch (createErr) {
+      // 无建库权限 ≠ 目标库不可用：直连目标库验证，可访问即继续
+      if (createErr.errno === 1044 || createErr.errno === 1142) {
+        logger.debug(`[MySQL] 无 CREATE DATABASE 权限（${createErr.code || createErr.message}），改为直连验证目标库 ${safeDb}`);
+        await verifyTargetDatabase(mysqlConfig);
+        logger.info(`[MySQL] 无建库权限，但目标库 ${safeDb} 可直接访问，继续使用现有库`);
+      } else {
+        throw createErr;
+      }
+    }
+    if (ensureFailureCount > 0) {
+      logger.info(`[MySQL] 数据库连接已恢复: ${safeDb}（此前连续失败 ${ensureFailureCount} 次）`);
+    } else if (created) {
+      logger.info(`[MySQL] 确保数据库存在: ${safeDb}`);
+    }
+    ensureFailureCount = 0;
     return true;
   } catch (error) {
-    logger.warn(`[MySQL] 确保数据库存在失败: ${error.message}`);
+    ensureFailureCount++;
+    const hint = describeMysqlErrorHint(error);
+    const detail = `[MySQL] 确保数据库可用失败(第 ${ensureFailureCount} 次): ${error.message}${hint ? `。${hint}` : ''}`;
+    if (ensureFailureCount === 1) {
+      logger.warn(`${detail}${hint ? '' : '，后续按指数退避重试（间隔 1min 起步，最长 15min）'}`);
+    } else {
+      logger.debug(detail);
+    }
     return false;
   } finally {
     if (conn) { try { await conn.end(); } catch (_) { /* ignore */ } }
@@ -94,8 +190,9 @@ async function ensureDatabaseExists(mysqlConfig) {
 
 /**
  * 获取MySQL连接池
+ * @param {object} [opts] 透传给 ensureDatabaseExists（用户主动操作时传 { force: true } 绕过退避）
  */
-async function getPool() {
+async function getPool(opts = {}) {
   const mysqlConfig = getMySQLConnectionConfig();
 
   if (!mysqlConfig || !mysqlConfig.host) {
@@ -115,7 +212,7 @@ async function getPool() {
     }
 
     // 先确保数据库存在（避免云端 DB 被删除导致 ER_BAD_DB_ERROR）
-    const ensured = await ensureDatabaseExists(mysqlConfig);
+    const ensured = await ensureDatabaseExists(mysqlConfig, opts);
     if (!ensured) {
       pool = null;
       currentConnectionConfig = null;
@@ -151,7 +248,7 @@ async function getPool() {
  * 测试MySQL连接
  */
 async function testConnection() {
-  const pool = await getPool();
+  const pool = await getPool({ force: true }); // 用户主动测试：绕过退避
   if (!pool) {
     return { success: false, message: 'MySQL未启用' };
   }
@@ -1090,10 +1187,10 @@ function createPoolWithConfig(customConfig) {
  * 使用自定义配置测试连接
  */
 async function testConnectionWithConfig(customConfig) {
-  // 先确保配置的数据库存在（避免 DB 被删后测试直接失败）
+  // 先确保配置的数据库存在（避免 DB 被删后测试直接失败）；用户主动测试：绕过退避
   const mysqlConfig = getConnectionConfigFromCustom(customConfig);
   if (mysqlConfig) {
-    await ensureDatabaseExists(mysqlConfig);
+    await ensureDatabaseExists(mysqlConfig, { force: true });
   }
 
   const pool = createPoolWithConfig(customConfig);
@@ -1116,7 +1213,8 @@ async function testConnectionWithConfig(customConfig) {
         logger.debug('关闭临时连接池失败:', e.message);
       }
     }
-    return { success: false, message: error.message };
+    const hint = describeMysqlErrorHint(error);
+    return { success: false, message: hint ? `${error.message}。${hint}` : error.message };
   }
 }
 
@@ -1133,8 +1231,8 @@ async function switchConnection(connectionConfig) {
     return { success: false, message: '无效的连接配置' };
   }
 
-  // 确保目标数据库存在
-  const ensured = await ensureDatabaseExists(mysqlConfig);
+  // 确保目标数据库存在（用户主动切换：绕过退避）
+  const ensured = await ensureDatabaseExists(mysqlConfig, { force: true });
   if (!ensured) {
     pool = null;
     currentConnectionConfig = null;
@@ -1401,5 +1499,7 @@ module.exports = {
   checkConnectionHealth,
   startHealthCheckTimer,
   stopHealthCheckTimer,
-  isConnectionHealthy
+  isConnectionHealthy,
+  ensureDatabaseExists,
+  describeMysqlErrorHint
 };

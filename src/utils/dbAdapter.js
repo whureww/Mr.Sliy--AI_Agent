@@ -1051,8 +1051,8 @@ async function processSyncQueue() {
     `).all(MAX_RETRY_COUNT);
     
     if (pendingOperations.length === 0) return;
-    
-    const pool = mysql.getPool();
+
+    const pool = await mysql.getPool();
     if (!pool) return;
     
     // 转换操作格式
@@ -1492,7 +1492,7 @@ class DbAdapter {
     if (mysql.isEnabled()) {
       setImmediate(async () => {
         try {
-          const pool = mysql.getPool();
+          const pool = await mysql.getPool();
           if (pool) {
             const connection = await pool.getConnection();
             await connection.beginTransaction();
@@ -1592,7 +1592,7 @@ class DbAdapter {
       if (mysql.isEnabled() && sqlOperations.length > 0) {
         setImmediate(async () => {
           try {
-            const pool = mysql.getPool();
+            const pool = await mysql.getPool();
             if (pool) {
               const connection = await pool.getConnection();
               await connection.beginTransaction();
@@ -1635,14 +1635,18 @@ class DbAdapter {
         return { success: true, count: 0, table: tableName };
       }
       
-      const pool = mysql.getPool();
+      const pool = await mysql.getPool();
       if (!pool) {
         return { success: false, message: 'MySQL连接池不可用', table: tableName };
       }
-      
+
       const connection = await pool.getConnection();
-      
+
       try {
+        // merge/append 模式同样需要结构自愈：云端旧表缺新列时自动 ALTER TABLE ADD COLUMN
+        if (mode !== 'overwrite') {
+          await ensureTableColumns(connection, tableName);
+        }
         await connection.beginTransaction();
         await connection.execute("SET sql_mode = ''");
         
@@ -1822,13 +1826,13 @@ class DbAdapter {
     }
 
     try {
-      const pool = mysql.getPool();
+      const pool = await mysql.getPool();
       if (!pool) {
         return { success: false, message: 'MySQL连接池不可用', table: tableName };
       }
-      
+
       const connection = await pool.getConnection();
-      
+
       try {
         await this.syncMysqlSchemaToSqlite(connection, tableName);
         

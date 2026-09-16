@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { decodeBuffer } = require('./encoding');
 
 /** 跳过的目录名（依赖/构建产物/版本库等大噪声目录） */
 const SKIP_DIRS = new Set([
@@ -86,10 +87,10 @@ function matchInFile(absPath, keyword, fsImpl, maxLineLength = 400) {
   let content;
   try {
     const buf = fsImpl.readFileSync(absPath);
-    // 前 8KB 含 NUL 字节视为二进制
-    const head = buf.subarray(0, 8192);
-    if (head.includes(0)) return [];
-    content = buf.toString('utf8');
+    // 编码自动检测解码（UTF-8/UTF-16/GBK/Big5/Shift_JIS 等）；二进制返回 null 跳过
+    const decoded = decodeBuffer(buf);
+    if (!decoded) return [];
+    content = decoded.text;
   } catch {
     return [];
   }

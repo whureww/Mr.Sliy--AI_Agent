@@ -108,8 +108,9 @@ class CodeOptimizationSkill extends Skill {
   }
 
   _readFile(filePath) {
-    const fs = require('fs');
-    return fs.readFileSync(filePath, 'utf-8');
+    // 编码自动检测读取（UTF-8/GBK/Big5/Shift_JIS 等）
+    const decoded = require('../../utils/encoding').readTextFileSync(filePath);
+    return decoded ? decoded.text : '';
   }
 
   async _optimizeCode(sourceCode, filePath, language, issues, options) {

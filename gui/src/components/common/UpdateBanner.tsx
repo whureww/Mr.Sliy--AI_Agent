@@ -238,16 +238,6 @@ export default function UpdateBanner({ info, onClose }: { info: CheckUpdatePaylo
         </button>
       )}
 
-      {phase === 'idle' && info.url && (
-        <button
-          className="btn-primary"
-          style={{ fontSize: 12, padding: '4px 12px', flexShrink: 0 }}
-          onClick={() => openExternal(info.url!).catch(() => {})}
-        >
-          {t('update.goDownload')}
-        </button>
-      )}
-
       {/* 关闭:下载中点关闭视为放弃下载(先取消后台请求),其余状态直接收起 */}
       <button
         className="btn-ghost"

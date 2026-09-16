@@ -33,8 +33,8 @@ interface Props {
   onSchedule: (path: string, minutes: number) => void;
   onProjectScan: () => void;
   onSelect: (path: string) => void;
-  /** 打开文件；line 存在时定位到该行（全文搜索/树过滤点击） */
-  onOpenFile: (node: { path: string; name?: string; is_dir?: boolean }, line?: number) => void;
+  /** 打开文件；line 存在时定位到该行；opts.analyze 为 true 时打开后自动切到分析模式 */
+  onOpenFile: (node: { path: string; name?: string; is_dir?: boolean }, line?: number, opts?: { analyze?: boolean }) => void;
   /** 折叠为窄条（宽度由 Workbench 布局状态控制） */
   collapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -483,13 +483,19 @@ export default function WorkspaceNav({
               }}
               title={t('nav.searchTip')}
               style={{
-                padding: '4px 9px',
-                fontSize: 12.5,
+                width: 28,
+                padding: 0,
                 flexShrink: 0,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
                 ...(searchOpen ? { color: 'var(--accent)', borderColor: 'var(--accent)' } : {})
               }}
             >
-              🔍
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <line x1="16.2" y1="16.2" x2="21" y2="21" />
+              </svg>
             </button>
           </div>
         )}
@@ -552,7 +558,7 @@ export default function WorkspaceNav({
               {filterHits.map(({ node, rel }) => (
                 <div
                   key={node.path}
-                  onClick={() => !node.is_dir && onOpenFile(node)}
+                  onClick={() => !node.is_dir && onOpenFile(node, undefined, { analyze: true })}
                   title={rel}
                   style={{
                     display: 'flex',

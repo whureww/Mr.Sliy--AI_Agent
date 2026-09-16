@@ -10,6 +10,7 @@ const { providerManager } = require('../services/llm/providers');
 const { logger } = require('../utils/logger');
 const { generateUUID, getFileLanguage } = require('../utils/helpers');
 const { isOnlineMode, checkNetworkConnectivity, getNetworkStatus } = require('../config');
+const { readTextFile } = require('../utils/encoding');
 const { ProgressBar } = require('../utils/progress');
 const { runWithConcurrency } = require('../utils/taskQueue');
 const fs = require('fs');
@@ -170,7 +171,8 @@ class DualModeEngine {
       if (onProgress) onProgress({ phase: 'reading', status: '读取文件', filePath });
       await this._delay(150);
 
-      const sourceCode = await fs.promises.readFile(filePath, 'utf-8');
+      // 编码自动检测读取（UTF-8/GBK/Big5/Shift_JIS 等），不再假设 UTF-8
+      const { text: sourceCode } = await readTextFile(filePath);
       const language = getFileLanguage(filePath);
 
       if (onProgress) onProgress({ phase: 'parsing', status: `解析语法树 (${language})`, filePath, language });

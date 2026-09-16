@@ -217,17 +217,226 @@ pub fn list_dir(path: String) -> Result<Vec<FileNode>, String> {
 }
 
 #[tauri::command]
-pub fn read_file(path: String) -> Result<serde_json::Value, String> {
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+pub fn read_file(path: String, encoding: Option<String>) -> Result<serde_json::Value, String> {
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    let label = encoding.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let (text, enc_label) = match label {
+        // 指定编码：按用户选择解码（BOM 移除，内容不含 BOM 字符）
+        Some(want) => {
+            let (enc, _) = resolve_encoding(want).ok_or_else(|| format!("不支持的编码: {want}"))?;
+            let (t, _) = enc.decode_with_bom_removal(&bytes);
+            (t.into_owned(), want.to_string())
+        }
+        // 自动检测：BOM 优先，其次 chardetng 统计检测（GBK/Big5/Shift_JIS/EUC-KR/Windows-125x 等）
+        None => {
+            if let Some((bom_enc, _)) = encoding_rs::Encoding::for_bom(&bytes) {
+                let (t, _, _) = bom_enc.decode(&bytes);
+                (t.into_owned(), bom_label(bom_enc))
+            } else {
+                let mut det = chardetng::EncodingDetector::new();
+                det.feed(&bytes, true);
+                let enc = det.guess(None, true);
+                let (t, _, _) = enc.decode(&bytes);
+                (t.into_owned(), enc.name().to_ascii_lowercase())
+            }
+        }
+    };
     Ok(json!({
-        "content": content,
-        "language": detect_language(&path)
+        "content": text,
+        "language": detect_language(&path),
+        "encoding": enc_label
     }))
 }
 
 #[tauri::command]
-pub fn save_file(path: String, content: String) -> Result<(), String> {
-    fs::write(&path, content).map_err(|e| e.to_string())
+pub fn save_file(path: String, content: String, encoding: Option<String>) -> Result<(), String> {
+    let label = encoding.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let bytes = match label {
+        None => content.into_bytes(),
+        Some(want) => encode_with(want, &content).ok_or_else(|| format!("不支持的编码: {want}"))?,
+    };
+    fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
+// ---------- 文件编码辅助 ----------
+
+/// GUI 编码标签 → encoding_rs 编码；返回 (编码, 是否写 BOM)
+/// 标签约定：utf-8 / utf-8-bom / utf-16le-bom / utf-16be-bom，其余原样走 WHATWG label
+fn resolve_encoding(label: &str) -> Option<(&'static encoding_rs::Encoding, bool)> {
+    match label.to_ascii_lowercase().as_str() {
+        "utf-8" | "utf8" => Some((encoding_rs::UTF_8, false)),
+        "utf-8-bom" => Some((encoding_rs::UTF_8, true)),
+        "utf-16le-bom" | "utf-16le" => Some((encoding_rs::UTF_16LE, true)),
+        "utf-16be-bom" | "utf-16be" => Some((encoding_rs::UTF_16BE, true)),
+        other => encoding_rs::Encoding::for_label(other.as_bytes()).map(|e| (e, false)),
+    }
+}
+
+/// 编码并序列化为字节；UTF-16 恒写 BOM（与 Windows 记事本/VS Code 一致），无法映射的字符按编码规则替换
+fn encode_with(label: &str, content: &str) -> Option<Vec<u8>> {
+    let (enc, bom) = resolve_encoding(label)?;
+    let mut out = Vec::new();
+    if bom {
+        // UTF-8 用 EF BB BF；UTF-16 用对应端序 BOM（与记事本/VS Code 一致）
+        out.extend_from_slice(if enc == encoding_rs::UTF_16LE {
+            &[0xFF, 0xFE][..]
+        } else if enc == encoding_rs::UTF_16BE {
+            &[0xFE, 0xFF][..]
+        } else {
+            &[0xEF, 0xBB, 0xBF][..]
+        });
+    }
+    if enc == encoding_rs::UTF_8 {
+        out.extend_from_slice(content.as_bytes());
+    } else if enc == encoding_rs::UTF_16LE {
+        out.extend(content.encode_utf16().flat_map(|u| u.to_le_bytes()));
+    } else if enc == encoding_rs::UTF_16BE {
+        out.extend(content.encode_utf16().flat_map(|u| u.to_be_bytes()));
+    } else {
+        let (bytes, _, _) = enc.encode(content);
+        out.extend_from_slice(&bytes);
+    }
+    Some(out)
+}
+
+/// BOM 检测命中的编码 → GUI 标签（UTF-16 恒带 BOM；UTF-8 区分带/不带）
+fn bom_label(enc: &'static encoding_rs::Encoding) -> String {
+    if enc == encoding_rs::UTF_8 {
+        "utf-8-bom".into()
+    } else if enc == encoding_rs::UTF_16LE {
+        "utf-16le-bom".into()
+    } else if enc == encoding_rs::UTF_16BE {
+        "utf-16be-bom".into()
+    } else {
+        enc.name().to_ascii_lowercase()
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::{bom_label, encode_with, resolve_encoding};
+    use encoding_rs::Encoding;
+
+    fn enc_of(label: &str) -> &'static Encoding {
+        resolve_encoding(label).unwrap().0
+    }
+
+    #[test]
+    fn gbk_roundtrip() {
+        let text = "你好，世界 // hello";
+        let bytes = encode_with("gbk", text).unwrap();
+        // GBK 双字节：0xC4 0xE3 = 你
+        assert_eq!(&bytes[..2], &[0xC4, 0xE3]);
+        let (decoded, _, _) = enc_of("gbk").decode(&bytes);
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn gb18030_roundtrip() {
+        let text = "代码优化智能体 Code ✓";
+        let bytes = encode_with("gb18030", text).unwrap();
+        let (decoded, _, _) = enc_of("gb18030").decode(&bytes);
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn utf8_bom_roundtrip() {
+        let bytes = encode_with("utf-8-bom", "fn main() {}").unwrap();
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF]);
+        let (decoded, _) = enc_of("utf-8").decode_with_bom_removal(&bytes);
+        assert_eq!(decoded, "fn main() {}");
+    }
+
+    #[test]
+    fn utf16le_bom_roundtrip() {
+        let text = "hello 世界";
+        let bytes = encode_with("utf-16le-bom", text).unwrap();
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
+        let (decoded, _) = enc_of("utf-16le").decode_with_bom_removal(&bytes);
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn utf16be_bom_roundtrip() {
+        let bytes = encode_with("utf-16be-bom", "abc").unwrap();
+        assert_eq!(&bytes[..2], &[0xFE, 0xFF]);
+        let (decoded, _) = enc_of("utf-16be").decode_with_bom_removal(&bytes);
+        assert_eq!(decoded, "abc");
+    }
+
+    #[test]
+    fn big5_shiftjis_euckr_roundtrip() {
+        for (label, text) in [
+            ("big5", "中文測試"),
+            ("shift_jis", "コード最適化"),
+            ("euc-kr", "코드 최적화"),
+        ] {
+            let bytes = encode_with(label, text).unwrap();
+            let (decoded, _, _) = enc_of(label).decode(&bytes);
+            assert_eq!(decoded, text, "roundtrip fail: {label}");
+        }
+    }
+
+    #[test]
+    fn latin1_unmappable_replaced_not_panic() {
+        // Windows-1252 无法表示 ✓ → 按编码规则替换，不 panic
+        let bytes = encode_with("windows-1252", "café ✓").unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn unsupported_label_rejected() {
+        assert!(resolve_encoding("not-a-real-enc").is_none());
+        assert!(encode_with("not-a-real-enc", "x").is_none());
+    }
+
+    #[test]
+    fn bom_label_mapping() {
+        assert_eq!(bom_label(encoding_rs::UTF_8), "utf-8-bom");
+        assert_eq!(bom_label(encoding_rs::UTF_16LE), "utf-16le-bom");
+        assert_eq!(bom_label(encoding_rs::GBK), "gbk");
+    }
+
+    #[test]
+    fn chardetng_detects_gbk_without_bom() {
+        // GBK 编码的中文长文本（无 BOM）→ chardetng 应识别为 GBK
+        let text = "这是一个用于验证编码自动检测的中文字符串，包含足够的样本长度让统计检测器收敛判定。";
+        let (bytes, _, _) = enc_of("gbk").encode(text);
+        let mut det = chardetng::EncodingDetector::new();
+        det.feed(&bytes, true);
+        let enc = det.guess(None, true);
+        assert_eq!(enc.name(), "GBK");
+    }
+
+    #[test]
+    fn read_save_command_gbk_roundtrip() {
+        use super::{read_file, save_file};
+        let p = std::env::temp_dir().join(format!("mrsliy-enc-gbk-{}.tmp", std::process::id()));
+        let text = "这是命令级端到端往返测试的中文字符串，长度足够让自动检测收敛为 GBK 编码判定。";
+        std::fs::write(&p, encode_with("gbk", text).unwrap()).unwrap();
+        // 自动检测读取
+        let r = read_file(p.to_string_lossy().into_owned(), None).unwrap();
+        assert_eq!(r["encoding"].as_str(), Some("gbk"));
+        assert_eq!(r["content"].as_str(), Some(text));
+        // 以相同编码保存修改后的内容 → 再读回验证
+        let updated = "更新后的内容 // updated";
+        save_file(p.to_string_lossy().into_owned(), updated.into(), Some("gbk".into())).unwrap();
+        let r2 = read_file(p.to_string_lossy().into_owned(), None).unwrap();
+        assert_eq!(r2["content"].as_str(), Some(updated));
+        assert_eq!(r2["encoding"].as_str(), Some("gbk"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn read_command_detects_utf8_bom() {
+        use super::read_file;
+        let p = std::env::temp_dir().join(format!("mrsliy-enc-bom-{}.tmp", std::process::id()));
+        std::fs::write(&p, encode_with("utf-8-bom", "plain ascii + 中文").unwrap()).unwrap();
+        let r = read_file(p.to_string_lossy().into_owned(), None).unwrap();
+        assert_eq!(r["encoding"].as_str(), Some("utf-8-bom"));
+        assert_eq!(r["content"].as_str(), Some("plain ascii + 中文"));
+        let _ = std::fs::remove_file(&p);
+    }
 }
 
 /// 前端状态文件路径：~/.mr-sliy/gui-state/<name>.json

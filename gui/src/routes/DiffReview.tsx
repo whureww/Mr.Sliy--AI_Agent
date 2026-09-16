@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { DiffPayload } from '../App';
-import { optimizeCode, saveFile } from '../ipc/client';
+import { optimizeCode, readFile, saveFile } from '../ipc/client';
 import { openContextMenu, copyText } from '../lib/contextMenu';
 import { t, useLang } from '../lib/i18n';
 
@@ -92,7 +92,14 @@ export default function DiffReview({ payload, onBack, onReady }: Props) {
     setApplying(true);
     setErr('');
     try {
-      await saveFile(filePath, result.optimizedCode);
+      // 自动识别磁盘文件当前编码并以相同格式保存（识别失败回落 UTF-8）
+      let enc: string | undefined;
+      try {
+        enc = (await readFile(filePath)).encoding;
+      } catch {
+        enc = undefined;
+      }
+      await saveFile(filePath, result.optimizedCode, enc);
       setApplied(true);
     } catch (e) {
       setErr((e as Error).message || t('diff.applyFail'));
