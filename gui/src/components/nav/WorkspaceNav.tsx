@@ -286,7 +286,7 @@ export default function WorkspaceNav({
               borderRadius: 7
             }}
           >
-            + 新建
+            + {t('nav.newSession')}
           </button>
           <button
             className="btn-ghost"

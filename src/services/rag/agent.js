@@ -49,9 +49,13 @@ class AIClient {
         { role: 'user', content: prompt }
       ];
 
+      // 输出上限按输入规模动态放大：优化结果为整段代码的 JSON 转义串（约 1.3 倍膨胀），
+      // 固定 2000 在文件稍大时必然截断 → JSON 解析失败 → 空结果。上限 8000（主流模型安全值）。
+      const maxTokens = Math.min(8000, Math.max(2000, Math.ceil(codeSnippet.length / 2) + 2000));
+
       const result = await provider.chat(messages, {
         temperature: 0.3,
-        maxTokens: 2000,
+        maxTokens,
         jsonMode: true
       });
 
@@ -59,10 +63,9 @@ class AIClient {
       let optimizedCode = '';
       let explanation = '';
       let suggestions = [];
-
       if (typeof result.content === 'object' && result.content !== null) {
-        // AI直接返回了JSON对象
-        optimizedCode = result.content.optimizedCode || '';
+        // AI直接返回了JSON对象（兼容字段名变体：optimized_code / code）
+        optimizedCode = result.content.optimizedCode || result.content.optimized_code || result.content.code || '';
         explanation = result.content.explanation || '';
         suggestions = result.content.suggestions || [];
       } else if (typeof result.rawContent === 'string') {
@@ -71,7 +74,7 @@ class AIClient {
           const jsonMatch = result.rawContent.match(/```json\s*([\s\S]*?)\s*```/) || result.rawContent.match(/\{[\s\S]*\}/);
           if (jsonMatch) {
             const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-            optimizedCode = parsed.optimizedCode || '';
+            optimizedCode = parsed.optimizedCode || parsed.optimized_code || parsed.code || '';
             explanation = parsed.explanation || '';
             suggestions = parsed.suggestions || [];
           } else {
@@ -81,6 +84,15 @@ class AIClient {
         } catch (parseError) {
           explanation = result.rawContent;
         }
+      }
+
+      // 空结果必须显式失败：透传空串会让前端按"整文件删除"渲染 diff
+      if (!optimizedCode || typeof optimizedCode !== 'string') {
+        logger.warn('AI优化返回内容为空或解析失败（可能输出被截断）');
+        return {
+          success: false,
+          message: 'AI 返回的优化结果为空或解析失败（可能因输出长度限制被截断），请重试或分段处理大文件'
+        };
       }
 
       return {
@@ -258,6 +270,15 @@ async function optimizeWithRAG(issue, context) {
     
     if (!aiResult.success) {
       return aiResult;
+    }
+
+    // 出口兜底：空代码视为失败，杜绝空串流向下沉管线（diff 全删 / MCP 返回空优化）
+    if (!aiResult.optimizedCode || typeof aiResult.optimizedCode !== 'string') {
+      return {
+        success: false,
+        message: 'AI 优化结果为空，请重试',
+        durationMs: Date.now() - startTime
+      };
     }
     
     // 4. 记录优化历史

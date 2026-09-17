@@ -465,6 +465,7 @@ const DICT: Record<string, Entry> = {
   },
   'wb.reportFail': { zh: '报告生成失败：{msg}', en: 'Report generation failed: {msg}' },
   'wb.optimizeFail': { zh: '优化请求失败', en: 'Optimization request failed' },
+  'wb.optimizeEmpty': { zh: 'AI 未返回有效代码（可能输出被截断），请重试', en: 'AI returned no valid code (possibly truncated), please retry' },
   'wb.tabOverflow': { zh: '全部已打开文件', en: 'All open files' },
   'wb.closeTab': { zh: '关闭标签页', en: 'Close tab' },
   'wb.copySel': { zh: '复制选中内容', en: 'Copy selection' },

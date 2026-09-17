@@ -77,6 +77,7 @@ export default function DiffReview({ payload, onBack, onReady }: Props) {
     setErr('');
     try {
       const opt = await optimizeCode(originalCode, filePath, language, 'general', t('diff.regeneratePrompt'));
+      if (!opt?.optimizedCode) throw new Error(t('wb.optimizeEmpty'));
       setExplanation(opt.explanation || '');
       result.optimizedCode = opt.optimizedCode;
       setApplied(false);

@@ -1045,6 +1045,8 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
         issue.message,
         issue.line
       );
+      // 空结果不进入对比页（全删零增的 diff 无意义）
+      if (!opt?.optimizedCode) throw new Error(t('wb.optimizeEmpty'));
       onOpenDiff({ filePath: currentFile.path, language: result?.language || 'javascript', originalCode: currentFile.content, result: opt });
     } catch (e) {
       setError((e as Error).message || t('wb.optimizeFail'));
@@ -1273,9 +1275,12 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
             })}
             </div>
 
-            {/* 溢出指示与下拉面板:列出全部已开文件供选择(挂外层,不被裁剪) */}
+            {/* 溢出指示与下拉面板:列出全部已开文件供选择(挂外层,不被裁剪)。
+                zIndex 必须显式高于编辑器输入层(z-index:20):覆盖层带 transform 自成
+                堆叠上下文,面板的 z-index 被困在内部;不提升的话整层被编辑器
+                textarea 盖住——面板可见但点击全部落空 */}
             {tabOverflow && (
-              <div style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', background: 'linear-gradient(90deg, transparent, var(--bg-card) 28%)', paddingLeft: 22 }}>
+              <div style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', background: 'linear-gradient(90deg, transparent, var(--bg-card) 28%)', paddingLeft: 22, zIndex: 30 }}>
                 <div style={{ position: 'relative' }}>
                   <button
                     className="btn-ghost"
