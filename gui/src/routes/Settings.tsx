@@ -39,6 +39,7 @@ import {
 import { MODE_CHANGE_EVENT, SCALES, THEMES, Appearance, ThemeMode, isDarkMode, normalizeAppearance, paletteOf, themeOf } from '../lib/appearance';
 import { Lang, setLang, t, useLang } from '../lib/i18n';
 import { getEditorFontSize, setEditorFontSize } from '../lib/editorPrefs';
+import { setUpdateDl } from '../lib/updateDlStore';
 import Collapse from '../components/common/Collapse';
 
 interface Props {
@@ -176,8 +177,6 @@ export default function Settings({ mode, onModeChange, appearance, onAppearanceC
   const [currentVersion, setCurrentVersion] = useState('');
   const [checkState, setCheckState] = useState<'idle' | 'checking' | 'done'>('idle');
   const [checkResult, setCheckResult] = useState<CheckUpdatePayload | null>(null);
-  // 安装包下载状态(与顶部横幅共享后端状态)
-  const [dlState, setDlState] = useState<DownloadState | null>(null);
   const [installing, setInstalling] = useState(false);
   // 高级选项:自定义更新源清单(默认收起,零配置使用 GitHub Releases)
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -364,20 +363,26 @@ export default function Settings({ mode, onModeChange, appearance, onAppearanceC
   }, [onUpdateInfoChange]);
 
   // 进入设置页时恢复安装包下载状态;下载中每 800ms 轮询进度
-  useEffect(() => {
-    getUpdateDownloadStatus().then(setDlState).catch(() => {});
+  // applyDl:本地 state 与全局 store 同步写入,顶部横幅据此即时跟随
+  const [dlState, _setDlState] = useState<DownloadState | null>(null);
+  const applyDl = useCallback((s: DownloadState | null) => {
+    _setDlState(s);
+    setUpdateDl(s);
   }, []);
+  useEffect(() => {
+    getUpdateDownloadStatus().then(applyDl).catch(() => {});
+  }, [applyDl]);
   useEffect(() => {
     if (dlState?.status !== 'downloading') return;
     const timer = setInterval(() => {
-      getUpdateDownloadStatus().then(setDlState).catch(() => {});
+      getUpdateDownloadStatus().then(applyDl).catch(() => {});
     }, 800);
     return () => clearInterval(timer);
-  }, [dlState?.status]);
+  }, [dlState?.status, applyDl]);
 
   const beginDownload = async (url: string, version: string, digest?: string) => {
     const s = await startUpdateDownload(url, version, digest).catch((e) => ({ status: 'error', error: (e as Error).message }) as DownloadState);
-    setDlState(s);
+    applyDl(s);
   };
 
   const installNow = async () => {
@@ -387,7 +392,7 @@ export default function Settings({ mode, onModeChange, appearance, onAppearanceC
       await installUpdate(dlState.filePath);
     } catch (e) {
       setInstalling(false);
-      setDlState({ ...dlState, status: 'error', error: (e as Error).message });
+      applyDl({ ...dlState, status: 'error', error: (e as Error).message });
     }
   };
 

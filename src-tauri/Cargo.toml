@@ -1,6 +1,6 @@
 [package]
 name = "mrsliy-desktop"
-version = "0.1.10"
+version = "0.2.0"
 description = "MR·SLIY 多语言代码优化智能体 · 桌面端"
 edition = "2021"
 

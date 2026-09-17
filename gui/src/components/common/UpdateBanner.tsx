@@ -9,6 +9,7 @@ import {
   openExternal
 } from '../../ipc/client';
 import { t, useLang } from '../../lib/i18n';
+import { getUpdateDl, setUpdateDl, subscribeUpdateDl } from '../../lib/updateDlStore';
 
 const DISMISS_KEY = 'update-banner-dismissed';
 
@@ -37,6 +38,12 @@ export default function UpdateBanner({ info, onClose }: { info: CheckUpdatePaylo
   const [installing, setInstalling] = useState(false);
   const aliveRef = useRef(true);
 
+  /** 本地 + 全局 store 同步写入:设置页(或其他订阅方)即时跟随 */
+  const applyDl = (s: DownloadState | null) => {
+    setDl(s);
+    setUpdateDl(s);
+  };
+
   useEffect(() => {
     aliveRef.current = true;
     return () => {
@@ -44,20 +51,36 @@ export default function UpdateBanner({ info, onClose }: { info: CheckUpdatePaylo
     };
   }, []);
 
+  // 订阅全局下载状态:设置页点"下载"/进度/完成/失败时,横幅即时同步
+  // (只读不回写,避免广播回环;版本不匹配的残留任务不接管)
+  useEffect(() => {
+    const unsub = subscribeUpdateDl((s) => {
+      if (!aliveRef.current) return;
+      if (s && (s.status === 'downloading' || s.status === 'done') && s.version && s.version !== info.latestVersion) return;
+      setDl(s);
+    });
+    return unsub;
+  }, [info.latestVersion]);
+
   // 挂载/新版本时恢复下载状态(仅恢复显示,绝不自动开始新下载)
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const st = await getUpdateDownloadStatus().catch(() => null);
-      if (cancelled || !st) return;
-      // 仅当任务属于当前提示的版本时才接管显示,避免旧版本残留状态串场
-      if ((st.status === 'downloading' || st.status === 'done') && (!st.version || st.version === info.latestVersion)) {
-        setDl(st);
-      }
+      // 后端是事实源:优先取后端状态,兼顾 store 里可能更新的缓存
+      const [st, cached] = await Promise.all([
+        getUpdateDownloadStatus().catch(() => null),
+        Promise.resolve(getUpdateDl())
+      ]);
+      if (cancelled) return;
+      const pick = (x: DownloadState | null) =>
+        x && (x.status === 'downloading' || x.status === 'done') && (!x.version || x.version === info.latestVersion) ? x : null;
+      const next = pick(st) || pick(cached);
+      if (next) applyDl(next);
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [info.latestVersion, info.download]);
 
   // 下载中轮询进度,终态停止
@@ -86,7 +109,7 @@ export default function UpdateBanner({ info, onClose }: { info: CheckUpdatePaylo
       // 成功时应用会退出,正常不会执行到这里
     } catch (e) {
       setInstalling(false);
-      setDl({ ...dl, status: 'error', error: e instanceof Error ? e.message : String(e) });
+      applyDl({ ...dl, status: 'error', error: e instanceof Error ? e.message : String(e) });
     }
   };
 
@@ -192,7 +215,7 @@ export default function UpdateBanner({ info, onClose }: { info: CheckUpdatePaylo
           style={{ fontSize: 12, padding: '4px 12px', flexShrink: 0 }}
           onClick={async () => {
             const s = await startUpdateDownload(info.download!, info.latestVersion!, info.digest).catch(() => null);
-            if (s) setDl(s);
+            if (s) applyDl(s);
           }}
         >
           {t('update.startDownload')}
@@ -207,7 +230,7 @@ export default function UpdateBanner({ info, onClose }: { info: CheckUpdatePaylo
           onClick={async () => {
             await cancelUpdateDownload().catch(() => {});
             const st = await getUpdateDownloadStatus().catch(() => null);
-            setDl(st && st.status !== 'idle' ? st : null);
+            applyDl(st && st.status !== 'idle' ? st : null);
           }}
         >
           {t('update.cancel')}
@@ -220,7 +243,7 @@ export default function UpdateBanner({ info, onClose }: { info: CheckUpdatePaylo
           style={{ fontSize: 12, padding: '4px 12px', flexShrink: 0 }}
           onClick={async () => {
             const s = await startUpdateDownload(info.download!, info.latestVersion!, info.digest).catch(() => null);
-            if (s) setDl(s);
+            if (s) applyDl(s);
           }}
         >
           {t('update.retry')}

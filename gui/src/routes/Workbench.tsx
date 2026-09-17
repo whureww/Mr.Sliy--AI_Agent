@@ -147,7 +147,13 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
   /** 标签栏溢出检测:溢出时收起为下拉面板(▼ n),未溢出正常平铺 */
   const tabBarRef = useRef<HTMLDivElement | null>(null);
   const [tabOverflow, setTabOverflow] = useState(false);
+  /** 溢出时平铺区能完整显示的标签数量(其余收进 ▼ 下拉),不溢出时等于 tabs.length */
+  const [tabVisibleCount, setTabVisibleCount] = useState(0);
   const [tabMenuOpen, setTabMenuOpen] = useState(false);
+  /** 各平铺标签元素引用(visibility:hidden 仍保留布局,offsetWidth 可测) */
+  const tabElsRef = useRef<(HTMLDivElement | null)[]>([]);
+  /** 上次溢出判定(measure 闭包内读最新值用) */
+  const tabOverflowRef = useRef(false);
   /** 聊天/扫描中断控制器：停止按钮使用 */
   const chatAbort = useRef<AbortController | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
@@ -209,23 +215,45 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
     }, 600);
   }, [workspaces, activeWs]);
 
-  /** 标签栏溢出检测:内容宽度超出容器 → 收起为下拉面板 */
+  /** 标签栏溢出检测:只把放不下的标签收进 ▼ 下拉,放得下的保持平铺。
+   *  测量目标为内层 overflow:hidden 包裹层;收起用 visibility 保留占位,
+   *  scrollWidth/offsetWidth 恒定 → 判定结果稳定不震荡。 */
   useEffect(() => {
     const el = tabBarRef.current;
     if (!el) {
       setTabOverflow(false);
+      setTabVisibleCount(0);
       return;
     }
+    const GAP = 4;
+    /** 溢出时 ▼ 按钮 + 渐变底需要的预留宽度 */
+    const RESERVE = 76;
     const measure = () => {
       // 容器不可见(宽 0,如分析模式/折叠)时跳过,避免误判
-      if (el.clientWidth === 0) return;
-      // 内层实际内容宽度(scrollWidth) > 容器可视宽度 → 溢出
-      const overflow = tabs.length > 0 && el.scrollWidth > el.clientWidth + 1;
-      setTabOverflow((prev) => {
-        // 收起溢出时若下拉开着,先收起,避免面板指向过期的溢出集合
-        if (overflow && !prev) setTabMenuOpen(false);
-        return overflow;
-      });
+      if (el.clientWidth === 0 || tabs.length === 0) return;
+      // 全部标签能完整放下 → 平铺
+      if (el.scrollWidth <= el.clientWidth + 1) {
+        tabOverflowRef.current = false;
+        setTabOverflow(false);
+        setTabVisibleCount(tabs.length);
+        return;
+      }
+      // 放不下 → 预留 ▼ 按钮宽度,算平铺区能容纳几个(至少 1 个)
+      let acc = 0;
+      let count = 0;
+      for (let i = 0; i < tabs.length; i++) {
+        const w = tabElsRef.current[i]?.offsetWidth || 0;
+        const next = acc + w + (i > 0 ? GAP : 0);
+        if (next > el.clientWidth - RESERVE) break;
+        acc = next;
+        count = i + 1;
+      }
+      count = Math.max(1, count);
+      // 首次进入溢出时收起打开中的下拉,避免面板指向过期的溢出集合
+      if (!tabOverflowRef.current && count < tabs.length) setTabMenuOpen(false);
+      tabOverflowRef.current = true;
+      setTabOverflow(true);
+      setTabVisibleCount(count);
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -1134,13 +1162,15 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
 
   const panelCol = layout.panelCollapsed ? `${COLLAPSED_W}px` : `${layout.panelWidth}px`;
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: `${layout.navCollapsed ? `${COLLAPSED_W}px` : `${layout.navWidth}px`} 1fr ${panelCol}`, gap: 16, height: '100%', position: 'relative' }}>
+    // 中栏必须 minmax(0,1fr):默认 1fr 的 min-content 会被长文件路径(不换行)撑大,
+    // 问题栏展开时 grid 整体溢出,中栏被压扁、头部按钮被 overflow:hidden 裁掉
+    <div style={{ display: 'grid', gridTemplateColumns: `${layout.navCollapsed ? `${COLLAPSED_W}px` : `${layout.navWidth}px`} minmax(0, 1fr) ${panelCol}`, gap: 16, height: '100%', position: 'relative' }}>
       {nav}
 
       {/* 中栏 · 编辑器（编辑模式主区域）：彩色语法高亮 + 可编辑任意行 */}
-      <section className="card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
-          <span className="mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+      <section className="card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderBottom: '1px solid var(--border-hairline)', minWidth: 0 }}>
+          <span className="mono" style={{ fontSize: 12, color: 'var(--text-muted)', flexShrink: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {currentFile?.path || t('wb.noFile')}
           </span>
           {dirty && (
@@ -1153,7 +1183,7 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
               value={currentEncoding}
               onChange={(e) => void changeEncoding(e.target.value)}
               title={t('wb.encoding')}
-              style={{ padding: '3px 6px', fontSize: 11.5, borderRadius: 7, border: '1px solid var(--border)', background: 'var(--bg-recessed)', color: 'var(--text-primary)' }}
+              style={{ padding: '3px 6px', fontSize: 11.5, borderRadius: 7, border: '1px solid var(--border)', background: 'var(--bg-recessed)', color: 'var(--text-primary)', flexShrink: 0 }}
             >
               {ENCODINGS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
@@ -1167,7 +1197,7 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
           {currentFile && (
             <button
               className="btn-ghost"
-              style={{ fontSize: 12.5 }}
+              style={{ fontSize: 12.5, flexShrink: 0 }}
               onClick={saveToDisk}
               disabled={!dirty || saving || activeLocked}
               title={activeLocked ? t('wb.locked') : `${t('wb.save')} (Ctrl+S)`}
@@ -1175,25 +1205,29 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
               {saving ? t('wb.saving') : savedFlash ? `${t('wb.saved')} ✓` : dirty ? t('wb.saveChanges') : t('wb.saved')}
             </button>
           )}
-          <button className="btn-primary" onClick={() => runScan()} disabled={!currentFile || scanning || activeLocked} title={activeLocked ? t('wb.locked') : undefined}>
+          <button className="btn-primary" style={{ flexShrink: 0 }} onClick={() => runScan()} disabled={!currentFile || scanning || activeLocked} title={activeLocked ? t('wb.locked') : undefined}>
             {scanning ? t('wb.scanning') : t('wb.scanFile')}
           </button>
         </div>
-        {/* 多标签页：同一会话可同时打开多个文件;溢出时收起为 ▼ 下拉面板选择 */}
+        {/* 多标签页：同一会话可同时打开多个文件;溢出时收起为 ▼ 下拉面板选择。
+            外层不裁剪(下拉面板要伸出容器之外);内层包裹层 overflow:hidden 只裁平铺标签。 */}
         {tabs.length > 0 && (
-          <div
-            ref={tabBarRef}
-            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 10px', borderBottom: '1px solid var(--border-hairline)', overflow: 'hidden', position: 'relative', minHeight: 34 }}
-          >
+          <div style={{ display: 'flex', alignItems: 'center', padding: '6px 10px', borderBottom: '1px solid var(--border-hairline)', position: 'relative', minHeight: 34 }}>
+            <div
+              ref={tabBarRef}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flex: 1, minWidth: 0 }}
+            >
             {tabs.map((tab, i) => {
               const active = currentFile?.path === tab.path;
               const tabDirty = tab.content !== tab.disk;
-              // 溢出收起时:隐藏全部平铺标签,只留下拉按钮(容器仍保留测量用原始宽度,
-              // 用 visibility 而非移除节点,避免 ResizeObserver 测量死循环)
-              const hidden = tabOverflow;
+              // 部分折叠:只隐藏平铺区放不下的标签(visibility 保留占位,测量值稳定)
+              const hidden = tabOverflow && i >= tabVisibleCount;
               return (
                 <div
                   key={tab.path}
+                  ref={(n) => {
+                    tabElsRef.current[i] = n;
+                  }}
                   onClick={() => switchTab(tab.path)}
                   onContextMenu={(e) =>
                     openContextMenu(e, [
@@ -1203,9 +1237,8 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
                   }
                   style={{
                     display: 'flex',
-                    // 溢出收起必须用 visibility(保留占位,scrollWidth 测量值稳定)。
-                    // 绝不能用 display:none:内容塌空 → scrollWidth 归零 → 判定不溢出
-                    // → 恢复显示 → 又溢出 → 无限翻转,ResizeObserver 跟随震荡把页面卡死
+                    // 必须用 visibility(保留占位)。display:none 会塌空内容导致
+                    // scrollWidth 归零 → 判定翻转 → ResizeObserver 无限震荡卡死
                     visibility: hidden ? 'hidden' : 'visible',
                     alignItems: 'center',
                     gap: 6,
@@ -1238,8 +1271,9 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
                 </div>
               );
             })}
+            </div>
 
-            {/* 溢出指示与下拉面板:列出全部已开文件供选择 */}
+            {/* 溢出指示与下拉面板:列出全部已开文件供选择(挂外层,不被裁剪) */}
             {tabOverflow && (
               <div style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', background: 'linear-gradient(90deg, transparent, var(--bg-card) 28%)', paddingLeft: 22 }}>
                 <div style={{ position: 'relative' }}>
@@ -1249,7 +1283,7 @@ export default function Workbench({ mode, onModeChange, onOpenDiff, analysisMode
                     onClick={() => setTabMenuOpen((v) => !v)}
                     style={{ fontSize: 11.5, padding: '3px 9px', display: 'flex', alignItems: 'center', gap: 4 }}
                   >
-                    {tabMenuOpen ? '▲' : '▼'} {tabs.length}
+                    {tabMenuOpen ? '▲' : '▼'} {tabs.length - tabVisibleCount}
                   </button>
                   {tabMenuOpen && (
                     <div
