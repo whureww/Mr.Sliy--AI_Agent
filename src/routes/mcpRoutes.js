@@ -6,9 +6,11 @@
 const express = require('express');
 const router = express.Router();
 const path = require('path');
-const { success } = require('../utils/response');
+const { success, error } = require('../utils/response');
+const { logger } = require('../utils/logger');
 const { SERVER_INFO, SUPPORTED_PROTOCOLS, TOOL_SUMMARIES, recentToolCalls } = require('../mcp/server');
 const { config } = require('../config');
+const externalMcp = require('../mcp/external');
 
 router.get('/status', (req, res) => {
   const appRoot = path.join(__dirname, '..', '..');
@@ -114,6 +116,98 @@ router.get('/selftest', async (req, res) => {
       toolCount: steps[1].toolCount
     })
   );
+});
+
+// ============================ 外部 MCP 服务器（智能体作为 MCP 客户端主动连接其他应用） ============================
+
+/** 服务器列表（配置 + 实时连接状态 + 工具清单） */
+router.get('/external', (req, res) => {
+  try {
+    return res.json(success({ servers: externalMcp.listServers() }));
+  } catch (err) {
+    logger.error(`查询外部 MCP 服务器失败: ${err.message}`);
+    return res.status(500).json(error(err.message));
+  }
+});
+
+/** 出站调用日志（先于含参数路由无冲突，此处注册顺序仅保证语义清晰） */
+router.get('/external/logs', (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 50;
+  return res.json(success({ logs: externalMcp.recentExternalCalls(limit) }));
+});
+
+/** 新增服务器配置 */
+router.post('/external', (req, res) => {
+  try {
+    const server = externalMcp.addServer(req.body || {});
+    return res.json(success({ server }));
+  } catch (err) {
+    return res.json(error(err.message));
+  }
+});
+
+/** 更新服务器配置（已连接的自动断开，需重连） */
+router.put('/external/:id', (req, res) => {
+  try {
+    const server = externalMcp.updateServer(req.params.id, req.body || {});
+    return res.json(success({ server }));
+  } catch (err) {
+    return res.json(error(err.message));
+  }
+});
+
+/** 删除服务器配置（已连接的先断开） */
+router.delete('/external/:id', (req, res) => {
+  try {
+    externalMcp.removeServer(req.params.id);
+    return res.json(success({ removed: true }));
+  } catch (err) {
+    return res.json(error(err.message));
+  }
+});
+
+/** 扫描本机可用的 HTTP MCP 服务（监听端口枚举 + initialize 握手探测） */
+router.post('/external/scan', async (req, res) => {
+  try {
+    const http = await externalMcp.scanHttpServers();
+    return res.json(success({ http }));
+  } catch (err) {
+    logger.warn(`扫描本机 MCP 服务失败: ${err.message}`);
+    return res.json(error(err.message));
+  }
+});
+
+/** 连接服务器：initialize 握手 → tools/list，返回工具清单 */
+router.post('/external/:id/connect', async (req, res) => {
+  try {
+    const server = await externalMcp.connectServer(req.params.id);
+    return res.json(success({ server, tools: server.tools || [] }));
+  } catch (err) {
+    logger.warn(`外部 MCP 连接请求失败: ${err.message}`);
+    return res.json(error(err.message));
+  }
+});
+
+/** 断开服务器 */
+router.post('/external/:id/disconnect', (req, res) => {
+  try {
+    externalMcp.disconnect(req.params.id);
+    return res.json(success({ disconnected: true }));
+  } catch (err) {
+    return res.json(error(err.message));
+  }
+});
+
+/** 手动调用外部工具：body = { tool, arguments } */
+router.post('/external/:id/call', async (req, res) => {
+  try {
+    const { tool, arguments: toolArgs } = req.body || {};
+    const result = await externalMcp.callTool(req.params.id, tool, toolArgs);
+    return res.json(success({ result }));
+  } catch (err) {
+    logger.warn(`外部 MCP 工具调用失败: ${err.message}`);
+    return res.json(error(err.message));
+  }
 });
 
 module.exports = router;

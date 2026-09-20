@@ -129,6 +129,73 @@ const DICT: Record<string, Entry> = {
   'mcp.copied': { zh: '已复制', en: 'Copied' },
   'mcp.loadFail': { zh: 'MCP 状态读取失败，请确认本地服务已就绪', en: 'Failed to load MCP status; make sure the local service is ready' },
 
+  // ---------- Settings：外部 MCP 服务器（智能体主动连接外部应用） ----------
+  'settings.mcpExt.title': { zh: '外部 MCP 服务器', en: 'External MCP Servers' },
+  'settings.mcpExt.desc': {
+    zh: '智能体作为 MCP 客户端主动连接其他应用（MCP 服务器），发现并手动调用其工具。本地应用走 stdio（子进程），远程服务走 HTTP',
+    en: 'The agent acts as an MCP client to connect to other apps (MCP servers), discover and manually invoke their tools. stdio for local apps (child process), HTTP for remote services'
+  },
+  'mcpExt.add': { zh: '添加服务器', en: 'Add server' },
+  'mcpExt.edit': { zh: '编辑', en: 'Edit' },
+  'mcpExt.delete': { zh: '删除', en: 'Delete' },
+  'mcpExt.deleteConfirm': { zh: '确认删除外部 MCP 服务器「{name}」？', en: 'Delete external MCP server "{name}"?' },
+  'mcpExt.connect': { zh: '连接', en: 'Connect' },
+  'mcpExt.disconnect': { zh: '断开', en: 'Disconnect' },
+  'mcpExt.connecting': { zh: '连接中…', en: 'Connecting…' },
+  'mcpExt.name': { zh: '名称', en: 'Name' },
+  'mcpExt.namePh': { zh: '例如：filesystem / git / 我的服务', en: 'e.g. filesystem / git / my service' },
+  'mcpExt.transport': { zh: '传输方式', en: 'Transport' },
+  'mcpExt.command': { zh: '启动命令', en: 'Command' },
+  'mcpExt.commandPh': { zh: '例如 node 或 C:\\tools\\server.exe', en: 'e.g. node or C:\\tools\\server.exe' },
+  'mcpExt.args': { zh: '参数（每行一个）', en: 'Arguments (one per line)' },
+  'mcpExt.argsPh': { zh: '例如服务器脚本的绝对路径', en: 'e.g. absolute path to the server script' },
+  'mcpExt.cwd': { zh: '工作目录（可选）', en: 'Working directory (optional)' },
+  'mcpExt.url': { zh: '服务地址', en: 'Server URL' },
+  'mcpExt.urlPh': { zh: 'http://127.0.0.1:3000/mcp', en: 'http://127.0.0.1:3000/mcp' },
+  'mcpExt.description': { zh: '描述（可选）', en: 'Description (optional)' },
+  'mcpExt.save': { zh: '保存', en: 'Save' },
+  'mcpExt.cancel': { zh: '取消', en: 'Cancel' },
+  'mcpExt.status.connected': { zh: '已连接', en: 'Connected' },
+  'mcpExt.status.disconnected': { zh: '未连接', en: 'Disconnected' },
+  'mcpExt.status.error': { zh: '错误', en: 'Error' },
+  'mcpExt.status.connecting': { zh: '连接中', en: 'Connecting' },
+  'mcpExt.tools': { zh: '工具（{n}）', en: 'Tools ({n})' },
+  'mcpExt.noTools': { zh: '该服务器未提供工具', en: 'This server exposes no tools' },
+  'mcpExt.call': { zh: '调用', en: 'Call' },
+  'mcpExt.argsJson': { zh: '参数（JSON，按 inputSchema 填写）', en: 'Arguments (JSON, follow inputSchema)' },
+  'mcpExt.runCall': { zh: '执行调用', en: 'Run' },
+  'mcpExt.calling': { zh: '调用中…', en: 'Calling…' },
+  'mcpExt.result': { zh: '结果（{ms}ms）', en: 'Result ({ms}ms)' },
+  'mcpExt.argsJsonInvalid': { zh: '参数不是合法 JSON 对象', en: 'Arguments are not a valid JSON object' },
+  'mcpExt.empty': { zh: '尚未添加外部服务器。添加后点击「连接」发现其工具。', en: 'No external servers yet. Add one and click "Connect" to discover its tools.' },
+  'mcpExt.loadFail': { zh: '外部服务器列表读取失败', en: 'Failed to load external servers' },
+  'mcpExt.hint.stdio': {
+    zh: '提示：Windows 下 npx/npm/uvx 命令会自动包装 cmd /c 执行；连接自身可用 command=node、参数填 mcp-server.js 的绝对路径',
+    en: 'Tip: on Windows, npx/npm/uvx are wrapped with cmd /c automatically; to connect to MR·SLIY itself, use command=node with the absolute path of mcp-server.js as an argument'
+  },
+  'mcpExt.enabled': { zh: '启用', en: 'Enabled' },
+  'mcpExt.scan': { zh: '扫描可用', en: 'Scan' },
+  'mcpExt.scanning': { zh: '扫描中…', en: 'Scanning…' },
+  'mcpExt.scanHint': {
+    zh: '扫描本机监听端口探测 HTTP MCP 服务；stdio 服务器无法自动发现，可从常用模板一键填入表单',
+    en: 'Probe local listening ports for HTTP MCP servers; stdio servers cannot be auto-discovered — fill the form from a common template'
+  },
+  'mcpExt.scanHttpTitle': { zh: '本机发现', en: 'Discovered locally' },
+  'mcpExt.scanEmpty': {
+    zh: '未发现可用的 MCP 服务。目标应用需已启动并在监听，也可手动填写地址。',
+    en: 'No MCP servers found. Make sure the target app is running and listening, or fill in the address manually.'
+  },
+  'mcpExt.scanAddConnect': { zh: '添加并连接', en: 'Add & connect' },
+  'mcpExt.alreadyAdded': { zh: '已添加', en: 'Added' },
+  'mcpExt.scanPresetTitle': { zh: '常用模板（点击填入表单，占位参数请自行修改）', en: 'Common templates (click to fill; edit placeholders)' },
+  'mcpExt.presetPlaceholder': { zh: '参数含占位符，保存前请修改', en: 'Arguments contain placeholders; edit before saving' },
+  'mcpExt.preset.filesystem': { zh: '读写本地文件（需指定允许目录）', en: 'Read/write local files (needs an allowed directory)' },
+  'mcpExt.preset.memory': { zh: '知识图谱式持久记忆', en: 'Knowledge-graph persistent memory' },
+  'mcpExt.preset.seq': { zh: '分步思考推理', en: 'Step-by-step thinking' },
+  'mcpExt.preset.git': { zh: 'Git 仓库操作', en: 'Git repository operations' },
+  'mcpExt.preset.fetch': { zh: '抓取网页转 Markdown', en: 'Fetch web pages as Markdown' },
+  'mcpExt.preset.everything': { zh: '官方测试服务器', en: 'Official test server' },
+
   // ---------- Settings：外观 ----------
   'settings.appearance.title': { zh: '外观设置', en: 'Appearance' },
   'settings.appearance.desc': {

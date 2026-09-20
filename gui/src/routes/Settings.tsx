@@ -3,6 +3,11 @@ import {
   AnalysisMode,
   CheckUpdatePayload,
   DownloadState,
+  ExternalMcpServer,
+  ExternalMcpServerInput,
+  ExternalMcpScanHit,
+  ExternalMcpTool,
+  ExternalMcpLog,
   LlmKeyInfo,
   LlmProvidersPayload,
   McpStatus,
@@ -13,16 +18,24 @@ import {
   APP_VERSION,
   activateLlmProvider,
   addCustomProvider,
+  addExternalMcpServer,
+  callExternalMcpTool,
   checkForUpdate,
   clearMemories,
+  connectExternalMcpServer,
+  deleteExternalMcpServer,
   deleteLlmProvider,
   deleteMemory,
+  disconnectExternalMcpServer,
+  getExternalMcpLogs,
+  getExternalMcpServers,
   getLlmKeys,
   getLlmProviders,
   getMcpStatus,
   getMcpLogs,
   runMcpSelftest,
   getMemories,
+  scanExternalMcpServers,
   getUpdateRecords,
   getUpdateDownloadStatus,
   getUpdateSource,
@@ -34,7 +47,8 @@ import {
   saveLlmProvider,
   saveUpdateSource,
   setMemoryCrossChat,
-  startUpdateDownload
+  startUpdateDownload,
+  updateExternalMcpServer
 } from '../ipc/client';
 import { MODE_CHANGE_EVENT, SCALES, THEMES, Appearance, ThemeMode, isDarkMode, normalizeAppearance, paletteOf, themeOf } from '../lib/appearance';
 import { Lang, setLang, t, useLang } from '../lib/i18n';
@@ -73,6 +87,47 @@ const NEEDS_KEY: Record<string, boolean> = { ollama: false };
 const providerLabel = (name: string) =>
   PROVIDER_NAME_KEYS[name] ? t(PROVIDER_NAME_KEYS[name])
     : PROVIDER_LABEL[name] || (name.startsWith('custom-') ? t('provider.customTag', { name: name.slice(7) }) : name);
+
+/**
+ * 按 MCP 工具的 inputSchema（JSON Schema）生成参数 JSON 模板：
+ * 顶层 properties 的必填/可选字段分别置为类型示例值或空串，便于手动调用前按提示填写。
+ */
+function previewArgsFromSchema(schema: Record<string, unknown> | undefined): string {
+  const props = schema && typeof schema === 'object' && typeof schema.properties === 'object' && schema.properties !== null
+    ? (schema.properties as Record<string, Record<string, unknown>>)
+    : {};
+  const required = Array.isArray(schema?.required) ? (schema!.required as string[]) : [];
+  const sample = (type: unknown): unknown => {
+    switch (type) {
+      case 'number':
+      case 'integer':
+        return 0;
+      case 'boolean':
+        return false;
+      case 'array':
+        return [];
+      case 'object':
+        return {};
+      default:
+        return ''
+    }
+  };
+  const obj: Record<string, unknown> = {};
+  for (const [key, spec] of Object.entries(props)) {
+    if (required.includes(key) || Object.keys(props).length <= 4) obj[key] = sample(spec && spec.type);
+  }
+  return JSON.stringify(obj, null, 2);
+}
+
+/** 常用 stdio MCP 服务器模板（stdio 无法自动发现，点击填入手动表单；含占位符的参数需用户修改） */
+const EXT_PRESETS: { key: string; name: string; command: string; args: string[] }[] = [
+  { key: 'filesystem', name: 'filesystem', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '<允许访问的目录>'] },
+  { key: 'memory', name: 'memory', command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'] },
+  { key: 'seq', name: 'sequential-thinking', command: 'npx', args: ['-y', '@modelcontextprotocol/server-sequential-thinking'] },
+  { key: 'git', name: 'git', command: 'uvx', args: ['mcp-server-git'] },
+  { key: 'fetch', name: 'fetch', command: 'uvx', args: ['mcp-server-fetch'] },
+  { key: 'everything', name: 'everything', command: 'npx', args: ['-y', '@modelcontextprotocol/server-everything'] }
+];
 
 const MODES: { key: AnalysisMode; badgeKey: string; titleKey: string; descKey: string }[] = [
   { key: 'local', badgeKey: 'mode.badge.local', titleKey: 'mode.local.title', descKey: 'mode.local.desc' },
@@ -194,6 +249,22 @@ export default function Settings({ mode, onModeChange, appearance, onAppearanceC
   // MCP 调用日志（默认收起，展开时加载）
   const [mcpLogs, setMcpLogs] = useState<McpCallLog[] | null>(null);
   const [mcpLogsOpen, setMcpLogsOpen] = useState(false);
+  // 外部 MCP 服务器（智能体作为 MCP 客户端主动连接其他应用）
+  const [extServers, setExtServers] = useState<ExternalMcpServer[] | null>(null);
+  const [extFormOpen, setExtFormOpen] = useState(false);
+  const [extEditingId, setExtEditingId] = useState<string | null>(null); // null=新增
+  const [extForm, setExtForm] = useState({ name: '', transport: 'stdio' as 'stdio' | 'http', command: '', argsText: '', cwd: '', url: '', description: '' });
+  const [extBusyId, setExtBusyId] = useState<string | null>(null); // 正在连接/断开/删除的服务器
+  const [extExpandedId, setExtExpandedId] = useState<string | null>(null); // 展开工具与调用面板的服务器
+  const [extCallTool, setExtCallTool] = useState<ExternalMcpTool | null>(null); // 正在配置调用的工具
+  const [extCallArgs, setExtCallArgs] = useState('{}');
+  const [extCallResult, setExtCallResult] = useState<{ tool: string; text: string; isError: boolean; elapsedMs: number } | null>(null);
+  const [extCalling, setExtCalling] = useState(false);
+  const [extLogs, setExtLogs] = useState<ExternalMcpLog[] | null>(null);
+  const [extLogsOpen, setExtLogsOpen] = useState(false);
+  // 扫描发现（HTTP MCP 服务探测 + 常用模板）
+  const [extScanning, setExtScanning] = useState(false);
+  const [extScanHits, setExtScanHits] = useState<ExternalMcpScanHit[] | null>(null); // null=尚未扫描
   // 设置导入 / 导出结果提示
   const [ioMsg, setIoMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [ioBusy, setIoBusy] = useState(false);
@@ -267,6 +338,209 @@ export default function Settings({ mode, onModeChange, appearance, onAppearanceC
       return !v;
     });
   }, [loadMcpLogs]);
+
+  // ======================= 外部 MCP 服务器（MCP 客户端） =======================
+
+  const refreshExtServers = useCallback(async () => {
+    try {
+      const { servers } = await getExternalMcpServers();
+      setExtServers(servers);
+    } catch {
+      setExtServers(null);
+    }
+  }, []);
+
+  const openExtAdd = useCallback(() => {
+    setExtEditingId(null);
+    setExtForm({ name: '', transport: 'stdio', command: '', argsText: '', cwd: '', url: '', description: '' });
+    setExtFormOpen(true);
+  }, []);
+
+  const openExtEdit = useCallback((s: ExternalMcpServer) => {
+    setExtEditingId(s.id);
+    setExtForm({
+      name: s.name,
+      transport: s.transport,
+      command: s.command || '',
+      argsText: (s.args || []).join('\n'),
+      cwd: s.cwd || '',
+      url: s.url || '',
+      description: s.description || ''
+    });
+    setExtFormOpen(true);
+  }, []);
+
+  /** 提交新增/编辑表单；失败内联提示（flash 是全局通知，这里用局部错误文本更合适） */
+  const submitExtForm = useCallback(async () => {
+    const input: ExternalMcpServerInput = {
+      name: extForm.name.trim(),
+      transport: extForm.transport,
+      description: extForm.description.trim(),
+      enabled: true
+    };
+    if (extForm.transport === 'stdio') {
+      input.command = extForm.command.trim();
+      input.args = extForm.argsText.split('\n').map((s) => s.trim()).filter(Boolean);
+      if (extForm.cwd.trim()) input.cwd = extForm.cwd.trim();
+    } else {
+      input.url = extForm.url.trim();
+    }
+    try {
+      if (extEditingId) await updateExternalMcpServer(extEditingId, input);
+      else await addExternalMcpServer(input);
+      setExtFormOpen(false);
+      await refreshExtServers();
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  }, [extForm, extEditingId, refreshExtServers]);
+
+  const removeExt = useCallback(
+    async (s: ExternalMcpServer) => {
+      if (!confirm(t('mcpExt.deleteConfirm', { name: s.name }))) return;
+      setExtBusyId(s.id);
+      try {
+        await deleteExternalMcpServer(s.id);
+        if (extExpandedId === s.id) setExtExpandedId(null);
+        await refreshExtServers();
+      } catch (e) {
+        alert((e as Error).message);
+      } finally {
+        setExtBusyId(null);
+      }
+    },
+    [extExpandedId, refreshExtServers]
+  );
+
+  /** 连接：握手 + 工具发现；成功展开工具面板，失败保留服务器并刷新错误状态 */
+  const connectExt = useCallback(
+    async (s: ExternalMcpServer) => {
+      setExtBusyId(s.id);
+      setExtCallResult(null);
+      setExtCallTool(null);
+      try {
+        await connectExternalMcpServer(s.id);
+        await refreshExtServers();
+        setExtExpandedId(s.id);
+      } catch (e) {
+        await refreshExtServers();
+        alert((e as Error).message);
+      } finally {
+        setExtBusyId(null);
+      }
+    },
+    [refreshExtServers]
+  );
+
+  const disconnectExt = useCallback(
+    async (s: ExternalMcpServer) => {
+      setExtBusyId(s.id);
+      try {
+        await disconnectExternalMcpServer(s.id);
+        if (extExpandedId === s.id) setExtExpandedId(null);
+        await refreshExtServers();
+      } finally {
+        setExtBusyId(null);
+      }
+    },
+    [extExpandedId, refreshExtServers]
+  );
+
+  /** 出站调用日志加载（定义在前，供 runExtCall 调用后刷新） */
+  const loadExtLogs = useCallback(async () => {
+    try {
+      const { logs } = await getExternalMcpLogs(50);
+      setExtLogs(logs);
+    } catch {
+      setExtLogs([]);
+    }
+  }, []);
+
+  /** 选中工具进入调用配置：按 inputSchema 生成 JSON 参数模板 */
+  const pickExtTool = useCallback((tool: ExternalMcpTool) => {
+    setExtCallResult(null);
+    setExtCallArgs(previewArgsFromSchema(tool.inputSchema));
+    setExtCallTool(tool);
+  }, []);
+
+  const runExtCall = useCallback(
+    async (s: ExternalMcpServer) => {
+      if (!extCallTool) return;
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(extCallArgs || '{}');
+        if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('bad');
+      } catch {
+        alert(t('mcpExt.argsJsonInvalid'));
+        return;
+      }
+      setExtCalling(true);
+      try {
+        const { result } = await callExternalMcpTool(s.id, extCallTool.name, args);
+        setExtCallResult(result);
+        void loadExtLogs();
+      } catch (e) {
+        setExtCallResult({ tool: extCallTool.name, text: (e as Error).message, isError: true, elapsedMs: 0 });
+      } finally {
+        setExtCalling(false);
+      }
+    },
+    [extCallTool, extCallArgs, loadExtLogs]
+  );
+
+  const toggleExtLogs = useCallback(() => {
+    setExtLogsOpen((v) => {
+      if (!v) void loadExtLogs();
+      return !v;
+    });
+  }, [loadExtLogs]);
+
+  /** 扫描本机可用的 HTTP MCP 服务（数秒），结果展示为可一键添加的列表 */
+  const scanExt = useCallback(async () => {
+    setExtScanning(true);
+    try {
+      const { http } = await scanExternalMcpServers();
+      setExtScanHits(http);
+    } catch (e) {
+      setExtScanHits([]);
+      alert((e as Error).message);
+    } finally {
+      setExtScanning(false);
+    }
+  }, []);
+
+  /** 扫描结果一键添加并连接；同名冲突等失败弹提示 */
+  const addScanHit = useCallback(
+    async (hit: ExternalMcpScanHit) => {
+      const name = (hit.name || `mcp-${new URL(hit.url).port}`).slice(0, 60);
+      setExtScanning(true);
+      try {
+        const { server } = await addExternalMcpServer({ name, transport: 'http', url: hit.url, enabled: true });
+        await refreshExtServers();
+        setExtScanHits((hits) => (hits || []).filter((h) => h.url !== hit.url));
+        try {
+          await connectExternalMcpServer(server.id);
+          await refreshExtServers();
+          setExtExpandedId(server.id);
+        } catch (e) {
+          await refreshExtServers();
+          alert((e as Error).message);
+        }
+      } catch (e) {
+        alert((e as Error).message);
+      } finally {
+        setExtScanning(false);
+      }
+    },
+    [refreshExtServers]
+  );
+
+  /** 常用模板一键填入新增表单（stdio），含占位符的参数由用户修改后保存 */
+  const fillExtPreset = useCallback((p: (typeof EXT_PRESETS)[number]) => {
+    setExtEditingId(null);
+    setExtForm({ name: p.name, transport: 'stdio', command: p.command, argsText: p.args.join('\n'), cwd: '', url: '', description: '' });
+    setExtFormOpen(true);
+  }, []);
 
   /** 导出偏好为 JSON 备份（外观 / 分析模式 / 编辑器字号；不含 API Key 等敏感信息） */
   const exportSettings = useCallback(async () => {
@@ -425,7 +699,7 @@ export default function Settings({ mode, onModeChange, appearance, onAppearanceC
     // 四项首屏数据全部落定后才回调就绪,页面切换过渡据此收场
     // (各 refresh 内部已 catch,Promise.all 等待首次请求完成)
     (async () => {
-      await Promise.all([refresh(), refreshMemories(), refreshUpdates(), refreshMcp()]);
+      await Promise.all([refresh(), refreshMemories(), refreshUpdates(), refreshMcp(), refreshExtServers()]);
       onReady?.();
     })();
     // 语言切换时同步刷新提示文案场景（数据本身与语言无关，仅初始化一次）
@@ -1096,6 +1370,310 @@ export default function Settings({ mode, onModeChange, appearance, onAppearanceC
               )
             )}
           </>
+        )}
+      </section>
+
+      {/* 外部 MCP 服务器：智能体作为 MCP 客户端主动连接其他应用 */}
+      <section className="card" style={{ padding: 18 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ fontWeight: 650, fontSize: 14 }}>{t('settings.mcpExt.title')}</div>
+          <div style={{ flex: 1 }} />
+          <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 14px' }} onClick={() => (extFormOpen ? setExtFormOpen(false) : openExtAdd())}>
+            {extFormOpen ? t('mcpExt.cancel') : t('mcpExt.add')}
+          </button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, margin: '4px 0 12px', lineHeight: 1.6 }}>{t('settings.mcpExt.desc')}</div>
+
+        {/* 扫描发现：自动探测本机 HTTP MCP 服务 + 常用模板一键填表 */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 10 }}>
+          <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 14px' }} disabled={extScanning} onClick={() => void scanExt()}>
+            {extScanning ? t('mcpExt.scanning') : t('mcpExt.scan')}
+          </button>
+          <div className="muted" style={{ fontSize: 11.5, lineHeight: 1.5, flex: 1, minWidth: 200 }}>{t('mcpExt.scanHint')}</div>
+        </div>
+        {extScanHits !== null && (
+          <div style={{ padding: 12, background: 'var(--bg-recessed)', borderRadius: 9, marginBottom: 12 }}>
+            {extScanHits.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12 }}>{t('mcpExt.scanEmpty')}</div>
+            ) : (
+              <>
+                <div style={{ fontSize: 12.5, fontWeight: 650, marginBottom: 8 }}>{t('mcpExt.scanHttpTitle')}</div>
+                {extScanHits.map((hit) => {
+                  const added = (extServers || []).some((s) => s.transport === 'http' && s.url === hit.url);
+                  return (
+                    <div key={hit.url} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--success)', flexShrink: 0 }} />
+                      <strong style={{ fontSize: 12.5 }}>{hit.name || `port-${new URL(hit.url).port}`}</strong>
+                      <span className="mono muted" style={{ fontSize: 11 }}>{hit.url}</span>
+                      {hit.toolCount ? <span className="muted" style={{ fontSize: 11 }}>{t('mcpExt.tools', { n: hit.toolCount })}</span> : null}
+                      <div style={{ flex: 1 }} />
+                      <button className="btn-ghost" style={{ fontSize: 12, padding: '4px 12px' }} disabled={added || extScanning} onClick={() => void addScanHit(hit)}>
+                        {added ? t('mcpExt.alreadyAdded') : t('mcpExt.scanAddConnect')}
+                      </button>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+            <div style={{ fontSize: 12.5, fontWeight: 650, margin: '10px 0 8px' }}>{t('mcpExt.scanPresetTitle')}</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {EXT_PRESETS.map((p) => (
+                <button
+                  key={p.key}
+                  className="mono"
+                  title={t(`mcpExt.preset.${p.key}`)}
+                  onClick={() => fillExtPreset(p)}
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 650,
+                    borderRadius: 999,
+                    padding: '3px 10px',
+                    cursor: 'pointer',
+                    border: 'none',
+                    color: 'var(--accent)',
+                    background: 'var(--accent-tint)'
+                  }}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 添加 / 编辑表单（内联） */}
+        {extFormOpen && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, padding: 12, background: 'var(--bg-recessed)', borderRadius: 9, marginBottom: 12 }}>
+            <Field label={t('mcpExt.name')}>
+              <input value={extForm.name} onChange={(e) => setExtForm({ ...extForm, name: e.target.value })} placeholder={t('mcpExt.namePh')} style={inputStyle} />
+            </Field>
+            <Field label={t('mcpExt.transport')}>
+              <select value={extForm.transport} onChange={(e) => setExtForm({ ...extForm, transport: e.target.value as 'stdio' | 'http' })} style={inputStyle}>
+                <option value="stdio">stdio（本地子进程）</option>
+                <option value="http">HTTP（远程服务）</option>
+              </select>
+            </Field>
+            {extForm.transport === 'stdio' ? (
+              <>
+                <Field label={t('mcpExt.command')}>
+                  <input value={extForm.command} onChange={(e) => setExtForm({ ...extForm, command: e.target.value })} placeholder={t('mcpExt.commandPh')} style={inputStyle} />
+                </Field>
+                <Field label={t('mcpExt.cwd')}>
+                  <input value={extForm.cwd} onChange={(e) => setExtForm({ ...extForm, cwd: e.target.value })} style={inputStyle} />
+                </Field>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <Field label={t('mcpExt.args')}>
+                    <textarea
+                      value={extForm.argsText}
+                      onChange={(e) => setExtForm({ ...extForm, argsText: e.target.value })}
+                      placeholder={t('mcpExt.argsPh')}
+                      rows={2}
+                      className="mono"
+                      style={{ ...inputStyle, fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+                    />
+                  </Field>
+                </div>
+              </>
+            ) : (
+              <div style={{ gridColumn: '1 / -1' }}>
+                <Field label={t('mcpExt.url')}>
+                  <input
+                    value={extForm.url}
+                    onChange={(e) => setExtForm({ ...extForm, url: e.target.value })}
+                    placeholder={t('mcpExt.urlPh')}
+                    className="mono"
+                    style={{ ...inputStyle, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                  />
+                </Field>
+              </div>
+            )}
+            <div style={{ gridColumn: '1 / -1' }}>
+              <Field label={t('mcpExt.description')}>
+                <input value={extForm.description} onChange={(e) => setExtForm({ ...extForm, description: e.target.value })} style={inputStyle} />
+              </Field>
+            </div>
+            {extForm.transport === 'stdio' && extForm.command.toLowerCase().includes('npx') && (
+              <div className="muted" style={{ gridColumn: '1 / -1', fontSize: 11.5, lineHeight: 1.6 }}>{t('mcpExt.hint.stdio')}</div>
+            )}
+            <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8 }}>
+              <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 16px' }} onClick={() => void submitExtForm()}>
+                {t('mcpExt.save')}
+              </button>
+              <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 16px' }} onClick={() => setExtFormOpen(false)}>
+                {t('mcpExt.cancel')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {extServers === null && <div className="muted" style={{ fontSize: 12.5 }}>{t('mcpExt.loadFail')}</div>}
+        {extServers !== null && extServers.length === 0 && !extFormOpen && (
+          <div className="muted" style={{ fontSize: 12.5 }}>{t('mcpExt.empty')}</div>
+        )}
+
+        {/* 服务器卡片列表 */}
+        {(extServers || []).map((s) => {
+          const expanded = extExpandedId === s.id;
+          const busy = extBusyId === s.id;
+          const statusColor = s.status === 'connected' ? 'var(--success)' : s.status === 'error' ? 'var(--danger)' : 'var(--border-hairline)';
+          return (
+            <div key={s.id} style={{ border: '1px solid var(--border-hairline)', borderRadius: 9, padding: 12, marginBottom: 10 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                <span title={s.status || 'disconnected'} style={{ width: 9, height: 9, borderRadius: 999, background: statusColor, flexShrink: 0 }} />
+                <strong style={{ fontSize: 13 }}>{s.name}</strong>
+                <span className="mono" style={{ fontSize: 10.5, fontWeight: 650, color: 'var(--accent)', background: 'var(--accent-tint)', borderRadius: 999, padding: '2px 8px' }}>
+                  {s.transport}
+                </span>
+                <span className="muted mono" style={{ fontSize: 11.5, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {s.transport === 'stdio' ? [s.command, ...(s.args || [])].join(' ') : s.url}
+                </span>
+                {s.toolCount ? <span className="muted" style={{ fontSize: 11.5 }}>{t('mcpExt.tools', { n: s.toolCount })}</span> : null}
+                <div style={{ flex: 1 }} />
+                {s.status === 'connected' ? (
+                  <button className="btn-ghost" style={{ fontSize: 12, padding: '4px 12px' }} disabled={busy} onClick={() => void disconnectExt(s)}>
+                    {t('mcpExt.disconnect')}
+                  </button>
+                ) : (
+                  <button className="btn-ghost" style={{ fontSize: 12, padding: '4px 12px' }} disabled={busy} onClick={() => void connectExt(s)}>
+                    {busy ? t('mcpExt.connecting') : t('mcpExt.connect')}
+                  </button>
+                )}
+                <button className="btn-ghost" style={{ fontSize: 12, padding: '4px 12px' }} disabled={busy} onClick={() => openExtEdit(s)}>
+                  {t('mcpExt.edit')}
+                </button>
+                <button className="btn-ghost" style={{ fontSize: 12, padding: '4px 12px', color: 'var(--danger)' }} disabled={busy} onClick={() => void removeExt(s)}>
+                  {t('mcpExt.delete')}
+                </button>
+              </div>
+              {s.status === 'error' && s.lastError && (
+                <div className="mono" style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 6, lineHeight: 1.6 }}>{s.lastError}</div>
+              )}
+
+              {/* 展开区：工具清单 + 手动调用 */}
+              {expanded && s.status === 'connected' && (
+                <div style={{ marginTop: 10, borderTop: '1px solid var(--border-hairline)', paddingTop: 10 }}>
+                  {(s.tools || []).length === 0 ? (
+                    <div className="muted" style={{ fontSize: 12 }}>{t('mcpExt.noTools')}</div>
+                  ) : (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {(s.tools || []).map((tool) => {
+                        const picked = extCallTool?.name === tool.name && extExpandedId === s.id;
+                        return (
+                          <button
+                            key={tool.name}
+                            className="mono"
+                            title={tool.description || tool.name}
+                            onClick={() => pickExtTool(tool)}
+                            style={{
+                              fontSize: 11,
+                              fontWeight: 650,
+                              borderRadius: 999,
+                              padding: '3px 10px',
+                              cursor: 'pointer',
+                              border: 'none',
+                              color: picked ? '#FFF' : 'var(--accent)',
+                              background: picked ? 'var(--accent)' : 'var(--accent-tint)'
+                            }}
+                          >
+                            {tool.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* 手动调用面板 */}
+                  {extCallTool && extExpandedId === s.id && (
+                    <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+                      <div className="muted" style={{ fontSize: 11.5 }}>{t('mcpExt.argsJson')}</div>
+                      <textarea
+                        value={extCallArgs}
+                        onChange={(e) => setExtCallArgs(e.target.value)}
+                        rows={5}
+                        className="mono selectable"
+                        style={{ ...inputStyle, fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+                      />
+                      <div>
+                        <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 16px' }} disabled={extCalling} onClick={() => void runExtCall(s)}>
+                          {extCalling ? t('mcpExt.calling') : t('mcpExt.runCall')}
+                        </button>
+                      </div>
+                      {extCallResult && (
+                        <div>
+                          <div className="muted" style={{ fontSize: 11.5, marginBottom: 4 }}>{t('mcpExt.result', { ms: extCallResult.elapsedMs })}</div>
+                          <pre
+                            className="mono selectable"
+                            style={{
+                              margin: 0,
+                              padding: '10px 12px',
+                              background: 'var(--bg-recessed)',
+                              borderRadius: 9,
+                              fontSize: 11.5,
+                              lineHeight: 1.6,
+                              overflowX: 'auto',
+                              maxHeight: 260,
+                              overflow: 'auto',
+                              whiteSpace: 'pre-wrap',
+                              color: extCallResult.isError ? 'var(--danger)' : undefined
+                            }}
+                          >
+                            {extCallResult.text}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* 出站调用日志 */}
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 6 }}>
+          <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 14px' }} onClick={toggleExtLogs}>
+            {extLogsOpen ? '▾ ' : '▸ '}
+            {t('mcp.logs.title', { n: 50 })}
+          </button>
+          {extLogsOpen && (
+            <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 14px' }} onClick={() => void loadExtLogs()}>
+              {t('mcp.logs.refresh')}
+            </button>
+          )}
+        </div>
+        {extLogsOpen && (
+          extLogs === null ? (
+            <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>…</div>
+          ) : extLogs.length === 0 ? (
+            <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t('mcp.logs.empty')}</div>
+          ) : (
+            <div className="selectable" style={{ marginTop: 8, overflow: 'auto', maxHeight: 320, border: '1px solid var(--border-hairline)', borderRadius: 9 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
+                <thead>
+                  <tr style={{ background: 'var(--bg-recessed)', textAlign: 'left' }}>
+                    <th style={{ padding: '6px 10px', fontWeight: 650 }}>{t('mcp.logs.col.time')}</th>
+                    <th style={{ padding: '6px 10px', fontWeight: 650 }}>{t('mcp.logs.col.tool')}</th>
+                    <th style={{ padding: '6px 10px', fontWeight: 650 }}>{t('mcp.logs.col.transport')}</th>
+                    <th style={{ padding: '6px 10px', fontWeight: 650 }}>{t('mcp.logs.col.elapsed')}</th>
+                    <th style={{ padding: '6px 10px', fontWeight: 650 }}>{t('mcp.logs.col.status')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {extLogs.map((lg, i) => (
+                    <tr key={i} style={{ borderTop: '1px solid var(--border-hairline)' }} title={`${lg.server} · ${lg.args}${lg.error ? `\n${lg.error}` : ''}`}>
+                      <td className="mono" style={{ padding: '5px 10px', whiteSpace: 'nowrap' }}>{String(lg.ts).replace('T', ' ').slice(0, 19)}</td>
+                      <td className="mono" style={{ padding: '5px 10px' }}>{lg.tool}</td>
+                      <td className="mono" style={{ padding: '5px 10px' }}>{lg.transport}</td>
+                      <td className="mono" style={{ padding: '5px 10px', whiteSpace: 'nowrap' }}>{lg.elapsedMs}ms</td>
+                      <td className="mono" style={{ padding: '5px 10px', color: lg.ok ? 'var(--success)' : 'var(--danger)' }}>
+                        {lg.ok ? '✓' : `✗ ${lg.error.slice(0, 40)}`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
         )}
       </section>
 

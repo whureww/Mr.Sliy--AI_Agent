@@ -1,6 +1,6 @@
 {
   "name": "mr-sliy",
-  "version": "3.9.1",
+  "version": "3.9.2",
   "description": "Mr.Sliy - 基于Tree-sitter与RAG的多语言代码优化智能体",
   "main": "src/agent.js",
   "bin": {

@@ -76,7 +76,7 @@ async function sidecarPort(): Promise<number> {
 }
 
 /** Tauri 模式下直连 sidecar HTTP（绕过 Rust 命令转发，便于扩展业务接口） */
-export async function sidecarRequest<T>(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+export async function sidecarRequest<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const port = IS_TAURI ? await sidecarPort() : DEV_PORT;
   const host = IS_TAURI ? '127.0.0.1' : DEV_HOST; // sidecar 固定监听 127.0.0.1；dev 跟随页面主机名
   const res = await fetch(`http://${host}:${port}${path}`, {
@@ -525,6 +525,116 @@ export interface McpSelftest {
  */
 export async function runMcpSelftest(): Promise<McpSelftest> {
   return unwrapData<McpSelftest>(await sidecarRequest('GET', '/api/mcp/selftest'));
+}
+
+// ---------- 外部 MCP 服务器（智能体作为 MCP 客户端主动连接其他应用） ----------
+
+export interface ExternalMcpTool {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+export interface ExternalMcpServer {
+  id: string;
+  name: string;
+  transport: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled: boolean;
+  description?: string;
+  createdAt?: string;
+  /** 实时连接状态（服务端合并）：connected / disconnected / error */
+  status?: 'connected' | 'disconnected' | 'error';
+  lastError?: string;
+  toolCount?: number;
+  tools?: ExternalMcpTool[];
+  connectedAt?: string | null;
+}
+
+/** 服务器配置表单输入（id 由服务端生成；更新时整包提交） */
+export interface ExternalMcpServerInput {
+  name: string;
+  transport: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+  description?: string;
+}
+
+export interface ExternalCallResult {
+  tool: string;
+  server: string;
+  text: string;
+  isError: boolean;
+  elapsedMs: number;
+}
+
+export interface ExternalMcpLog {
+  ts: string;
+  server: string;
+  tool: string;
+  args: string;
+  ok: boolean;
+  error: string;
+  elapsedMs: number;
+  transport: string;
+}
+
+/** 扫描发现的本机 HTTP MCP 服务 */
+export interface ExternalMcpScanHit {
+  url: string;
+  name: string;
+  protocolVersion: string;
+  toolCount: number;
+  via: string;
+}
+
+/** 外部服务器列表（含实时连接状态与工具清单） */
+export async function getExternalMcpServers(): Promise<{ servers: ExternalMcpServer[] }> {
+  return unwrapData<{ servers: ExternalMcpServer[] }>(await sidecarRequest('GET', '/api/mcp/external'));
+}
+
+export async function addExternalMcpServer(input: ExternalMcpServerInput): Promise<{ server: ExternalMcpServer }> {
+  return unwrapData<{ server: ExternalMcpServer }>(await sidecarRequest('POST', '/api/mcp/external', input));
+}
+
+export async function updateExternalMcpServer(id: string, input: ExternalMcpServerInput): Promise<{ server: ExternalMcpServer }> {
+  return unwrapData<{ server: ExternalMcpServer }>(await sidecarRequest('PUT', `/api/mcp/external/${id}`, input));
+}
+
+export async function deleteExternalMcpServer(id: string): Promise<void> {
+  await sidecarRequest('DELETE', `/api/mcp/external/${id}`);
+}
+
+/** 连接外部服务器（initialize 握手 → tools/list），失败抛出错误信息 */
+export async function connectExternalMcpServer(id: string): Promise<{ tools: ExternalMcpTool[] }> {
+  return unwrapData<{ tools: ExternalMcpTool[] }>(await sidecarRequest('POST', `/api/mcp/external/${id}/connect`));
+}
+
+export async function disconnectExternalMcpServer(id: string): Promise<void> {
+  await sidecarRequest('POST', `/api/mcp/external/${id}/disconnect`);
+}
+
+/** 手动调用外部工具 */
+export async function callExternalMcpTool(id: string, tool: string, args: Record<string, unknown>): Promise<{ result: ExternalCallResult }> {
+  return unwrapData<{ result: ExternalCallResult }>(await sidecarRequest('POST', `/api/mcp/external/${id}/call`, { tool, arguments: args }));
+}
+
+/** 外部工具出站调用日志（新的在前） */
+export async function getExternalMcpLogs(limit = 50): Promise<{ logs: ExternalMcpLog[] }> {
+  return unwrapData<{ logs: ExternalMcpLog[] }>(await sidecarRequest('GET', `/api/mcp/external/logs?limit=${limit}`));
+}
+
+/** 扫描本机可用的 HTTP MCP 服务（可能耗时数秒） */
+export async function scanExternalMcpServers(): Promise<{ http: ExternalMcpScanHit[] }> {
+  return unwrapData<{ http: ExternalMcpScanHit[] }>(await sidecarRequest('POST', '/api/mcp/external/scan', {}));
 }
 
 // ---------- 工作区全文搜索（跨文件查找） ----------

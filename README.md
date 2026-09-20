@@ -73,7 +73,8 @@ $ mr-sliy
 **可靠性与集成**
 
 - 自持引擎：监控 → 分析 → 决策 → 执行 → 验证闭环，支持自更新、自修复与回滚
-- MCP 接入：外部客户端经 Model Context Protocol（HTTP / stdio）调用智能体能力，设置页可查看最近的工具调用日志
+- MCP 服务端：外部客户端经 Model Context Protocol（HTTP / stdio）调用智能体能力，设置页可查看最近的工具调用日志
+- MCP 客户端：智能体主动连接其他应用提供的外部 MCP 服务器（stdio / HTTP），扫描发现可用服务或套用常用模板，手动调用其工具并记录出站日志
 - 双数据库：SQLite（本地）与 MySQL（云端）双向同步
 
 ## 快速上手
@@ -156,6 +157,8 @@ npm test                                 # 运行单元测试
 
 可用工具：`scan_code`、`scan_project`、`optimize_code`、`chat`、`search_knowledge`、`list_memories`、`add_memory`、`get_scan_history` 等。
 
+**外部 MCP 服务器（智能体作为客户端出站）**：设置页「外部 MCP 服务器」添加其他应用提供的 MCP 服务器——本地应用填 `command` + 参数走 stdio（Windows 下 npx / uvx 自动包装 `cmd /c`），远程服务填 `http(s)://` 地址走 HTTP；也可点击「扫描可用」自动探测本机服务一键接入。连接后列出对方工具，按 inputSchema 生成参数模板手动调用，出站调用日志可查。
+
 ## 数据、配置与安全
 
 运行时数据位于 `~/.mr-sliy/`：
@@ -204,6 +207,13 @@ MIT（见 [package.json](package.json)）。
 ## 更新日志
 
 完整历史见 [GitHub Releases](https://github.com/whureww/Mr.Sliy--AI_Agent/releases)。
+
+### v0.2.2（2026-09-20）
+
+- 新增：外部 MCP 服务器——智能体作为 MCP 客户端主动连接其他应用。stdio（本地子进程）/ HTTP（远程服务）双传输，Windows 自动包装 `cmd /c`，兼容 Mcp-Session-Id 会话与 SSE 响应
+- 新增：扫描可用——枚举本机监听端口与常见端口做 MCP 握手探测，发现的服务一键「添加并连接」；stdio 服务器提供常用模板（filesystem / memory / sequential-thinking / git / fetch / everything）一键填表
+- 新增：工具发现与手动调用——按 inputSchema 生成参数模板，出站调用日志（最近 50 条）可查
+- 新增 REST：`/api/mcp/external`（列表 / 增删改 / 连接 / 断开 / 调用 / 日志 / 扫描）
 
 ### v0.2.1（2026-09-17）
 

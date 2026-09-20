@@ -73,7 +73,8 @@ $ mr-sliy
 **Reliability & integration**
 
 - Self-sustaining engine: monitor → analyze → decide → execute → verify closed loop, with self-update, self-repair, and rollback
-- MCP integration: external clients call agent capabilities over the Model Context Protocol (HTTP / stdio); the settings page shows recent tool call logs
+- MCP server: external clients call agent capabilities over the Model Context Protocol (HTTP / stdio); the settings page shows recent tool call logs
+- MCP client: the agent proactively connects to external MCP servers exposed by other apps (stdio / HTTP), discovers them via scan or common templates, invokes their tools manually, and keeps outbound call logs
 - Dual databases: SQLite (local) and MySQL (cloud) two-way sync
 
 ## Getting Started
@@ -156,6 +157,8 @@ The Settings page shows ready-to-use config; external clients (e.g. Claude Deskt
 
 Available tools: `scan_code`, `scan_project`, `optimize_code`, `chat`, `search_knowledge`, `list_memories`, `add_memory`, `get_scan_history`, and more.
 
+**External MCP servers (the agent as an outbound client)**: add MCP servers exposed by other apps under Settings → "External MCP Servers" — local apps take `command` + args over stdio (npx / uvx are wrapped with `cmd /c` on Windows), remote services take an `http(s)://` URL over HTTP; or click "Scan" to probe local services and add them in one click. After connecting, list the remote tools and invoke them manually with argument templates generated from inputSchema; outbound call logs are available.
+
 ## Data, Configuration & Security
 
 Runtime data lives under `~/.mr-sliy/`:
@@ -204,6 +207,25 @@ MIT (see [package.json](package.json)).
 ## Changelog
 
 For the full history, see [GitHub Releases](https://github.com/whureww/Mr.Sliy--AI_Agent/releases).
+
+### v0.2.2 (2026-09-20)
+
+- New: External MCP servers — the agent acts as an MCP client to connect to other apps. Dual transports: stdio (local child process) / HTTP (remote service); `cmd /c` wrapping on Windows; Mcp-Session-Id and SSE response support
+- New: Scan — probes local listening ports plus common ports with MCP handshakes; discovered services can be added & connected in one click; stdio servers ship common templates (filesystem / memory / sequential-thinking / git / fetch / everything) that fill the form in one click
+- New: Tool discovery & manual invocation — argument templates generated from inputSchema; outbound call logs (last 50)
+- New REST endpoints: `/api/mcp/external` (list / CRUD / connect / disconnect / call / logs / scan)
+
+### v0.2.1 (2026-09-17)
+
+- Fixed: AI fixes producing "delete-everything" diffs — the optimization output cap was fixed at 2000 tokens, so larger files got truncated and empty results from failed JSON parsing were still treated as success. The cap now scales with code size (up to 8000) and empty results fail explicitly (backend double guard + frontend interception; no longer enters the diff page)
+- Fixed: "New" button in the main workspace not following the zh/en language switch (hardcoded text moved to i18n)
+
+### v0.2.0 (2026-09-17)
+
+- Fixed: update download started from Settings not syncing with the top update banner (two UIs held independent download state; a shared store now syncs start / progress / completion / cancel both ways)
+- Fixed: editor multi-tab dropdown clipped when tabs overflow (panel was mounted inside an overflow:hidden container; split outer panel host from inner clipping tab strip)
+- Improved: overflowing editor tabs now partially collapse — tabs that fit stay flat, only the rest fold into the ▼ dropdown (button shows the overflow count)
+- Improved: edit-mode layout — expanding the issue panel no longer squeezes the editor (grid middle column minmax(0,1fr) prevents long paths from blowing up min-content); only the file path shrinks to ellipsis when space is tight, encode / save / scan buttons stay fully visible
 
 ### v0.1.7 (2026-09-14)
 
